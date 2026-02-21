@@ -299,6 +299,7 @@ mod tests {
             language: None,
             profile: None,
             level: None,
+            encoder_delay: 0,
         });
 
         index.audio_streams.push(AudioStreamInfo {

@@ -33,6 +33,7 @@ pub fn analyze_video_stream(stream: &ffmpeg::Stream, index: usize) -> Result<Vid
         language: get_stream_language(stream),
         profile: if profile != -99 { Some(profile) } else { None },
         level: if level != -99 { Some(level) } else { None },
+        encoder_delay: 0,
     })
 }
 

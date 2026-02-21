@@ -149,12 +149,15 @@ pub fn scan_file_with_options<P: AsRef<Path>>(
         );
     }
 
-    // Determine encoder_delay for each audio stream by reading its first packet.
+    // Determine encoder_delay for each stream by reading its first packet.
     // FFmpeg signals encoder delay as a negative first-packet DTS — universal
-    // across all containers (MP4, MKV, …) and codecs (AAC, Opus, Vorbis, …).
+    // across all containers (MP4, MKV, …) and codecs (H.264, AAC, Opus, …).
     // The init segment's edit list tells the player:
     //   presentation = (tfdt - encoder_delay) / timescale
-    // so we must set: tfdt = video_presentation * timescale + encoder_delay
+    // We capture both video and audio delays so we can compute the net offset:
+    //   audio_tfdt = video_presentation_in_audio_tb
+    //                + audio_encoder_delay
+    //                - video_encoder_delay_rescaled_to_audio_tb
     {
         use std::collections::HashMap;
         let audio_indices: std::collections::HashSet<usize> = index.audio_streams
@@ -162,27 +165,56 @@ pub fn scan_file_with_options<P: AsRef<Path>>(
             .map(|a| a.stream_index)
             .collect();
         let mut delays: HashMap<usize, i64> = HashMap::new();
+        let mut video_delay_found = false;
 
         for (stream, packet) in context.packets() {
             let idx = stream.index();
-            if !audio_indices.contains(&idx) || delays.contains_key(&idx) {
+            let is_audio = audio_indices.contains(&idx);
+            let is_video = idx == video_stream_idx;
+
+            if !is_audio && !is_video {
                 continue;
             }
+            if delays.contains_key(&idx) {
+                continue;
+            }
+
             let dts = packet.dts().unwrap_or(0);
             let delay = if dts < 0 { -dts } else { 0 };
             delays.insert(idx, delay);
-            tracing::debug!(
-                "Audio stream {}: first_pkt_dts={}, encoder_delay={}",
-                idx, dts, delay
-            );
-            if delays.len() == audio_indices.len() {
+
+            if is_video {
+                video_delay_found = true;
+                tracing::debug!(
+                    "Video stream {}: first_pkt_dts={}, encoder_delay={}",
+                    idx, dts, delay
+                );
+            } else {
+                tracing::debug!(
+                    "Audio stream {}: first_pkt_dts={}, encoder_delay={}",
+                    idx, dts, delay
+                );
+            }
+
+            if video_delay_found && delays.len() == audio_indices.len() + 1 {
                 break;
             }
         }
 
+        let video_delay_native = *delays.get(&video_stream_idx).unwrap_or(&0);
+        for video in &mut index.video_streams {
+            video.encoder_delay = video_delay_native;
+        }
         for audio in &mut index.audio_streams {
             audio.encoder_delay = *delays.get(&audio.stream_index).unwrap_or(&0);
         }
+
+        tracing::debug!(
+            "encoder delays: video={} (tb={}/{}), audio streams: {:?}",
+            video_delay_native,
+            video_tb.numerator(), video_tb.denominator(),
+            index.audio_streams.iter().map(|a| (a.stream_index, a.encoder_delay)).collect::<Vec<_>>()
+        );
     }
 
     // Build segment boundaries from keyframe entries
@@ -241,6 +273,7 @@ pub fn scan_file_with_options<P: AsRef<Path>>(
     }
 
     index.segments = segments;
+    index.init_segment_first_pts();
     index.indexed_at = SystemTime::now();
 
     tracing::info!(
@@ -289,6 +322,7 @@ fn build_segments_from_entries(
                     duration_secs: duration,
                     is_keyframe: true,
                     video_byte_offset: seg_start_byte,
+                    first_video_pts: start_pts,
                 });
                 segment_sequence += 1;
                 seg_start_pts = Some(pts);
@@ -313,6 +347,7 @@ fn build_segments_from_entries(
             duration_secs: duration,
             is_keyframe: true,
             video_byte_offset: seg_start_byte,
+            first_video_pts: start_pts,
         });
     }
 
