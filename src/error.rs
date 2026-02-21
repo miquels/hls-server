@@ -25,6 +25,9 @@ pub enum HlsError {
     #[error("No video stream found in source file")]
     NoVideoStream,
 
+    #[error("No demuxer index: {0}")]
+    NoIndex(String),
+
     #[error("No supported audio codec found")]
     NoSupportedAudio,
 

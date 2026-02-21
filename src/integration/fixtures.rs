@@ -174,6 +174,9 @@ impl TestMediaInfo {
                 language,
                 format: SubtitleFormat::SubRip,
                 non_empty_sequences: (0..num_segments).collect(),
+                sample_index: Vec::new(),
+                timebase: ffmpeg_next::Rational::new(1, 1000),
+                start_time: 0,
             });
             sub_index += 1;
         }

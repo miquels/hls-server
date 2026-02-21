@@ -7,6 +7,7 @@
 //! - Timebase conversion and other utilities
 
 pub mod context;
+pub mod index;
 pub mod io;
 pub mod utils;
 

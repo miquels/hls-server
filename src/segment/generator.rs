@@ -394,16 +394,8 @@ fn generate_transcoded_audio_segment(
     use crate::transcode::pipeline::transcode_audio_segment;
     use crate::transcode::resampler::HLS_SAMPLE_RATE;
 
-    // Determine video timebase (same as what the scanner uses for segment boundaries)
-    let video_timebase = index
-        .video_streams
-        .first()
-        .and_then(|v| {
-            ffmpeg::format::input(&index.source_path)
-                .ok()
-                .and_then(|input| input.stream(v.stream_index).map(|s| s.time_base()))
-        })
-        .unwrap_or(ffmpeg::Rational(1, 90000));
+    // Use the video timebase stored at index time — no need to re-open the file.
+    let video_timebase = index.video_timebase;
 
     // Run the full transcode pipeline
     let (aac_packets, output_timebase) =
@@ -462,7 +454,12 @@ fn generate_transcoded_audio_segment(
     Ok(Bytes::from(media_data))
 }
 
-/// Generate a subtitle segment (WebVTT)
+/// Generate a subtitle segment (WebVTT).
+///
+/// Uses the per-sample byte-offset index built at scan time to seek directly
+/// to each subtitle sample in the file.  No full-file scan, no iteration over
+/// video/audio packets — only the subtitle samples that fall within the
+/// requested time range are read.
 pub fn generate_subtitle_segment(
     index: &StreamIndex,
     track_index: usize,
@@ -470,6 +467,7 @@ pub fn generate_subtitle_segment(
     end_sequence: usize,
     _source_path: &Path,
 ) -> Result<Bytes> {
+    use crate::ffmpeg::index::seek_to_byte_offset;
     use crate::subtitle::decoder::is_bitmap_subtitle_codec;
     use crate::subtitle::extractor::SubtitleExtractor;
     use crate::subtitle::webvtt::{WebVttConfig, WebVttWriter};
@@ -494,7 +492,6 @@ pub fn generate_subtitle_segment(
             sequence: end_sequence,
         })?;
 
-    // Find the subtitle stream metadata
     let sub_info = index
         .subtitle_streams
         .iter()
@@ -503,7 +500,6 @@ pub fn generate_subtitle_segment(
             HlsError::StreamNotFound(format!("subtitle stream {} not found", track_index))
         })?;
 
-    // Bitmap subtitles (PGS, DVB, XSUB) cannot be converted to WebVTT
     if is_bitmap_subtitle_codec(sub_info.codec_id) {
         return Err(HlsError::Muxing(format!(
             "Subtitle stream {} uses a bitmap codec ({:?}) which cannot be converted to WebVTT",
@@ -511,73 +507,21 @@ pub fn generate_subtitle_segment(
         )));
     }
 
-    // Open source file
-    let mut input = ffmpeg::format::input(&index.source_path)
-        .map_err(|e| HlsError::Ffmpeg(crate::error::FfmpegError::OpenInput(e.to_string())))?;
-
-    // Find stream + timebase
-    let (stream_timebase, codec_id) = input
-        .stream(track_index)
-        .map(|s| (s.time_base(), s.parameters().id()))
-        .ok_or_else(|| HlsError::StreamNotFound(format!("stream {} not in file", track_index)))?;
-
-    // segment.start_pts / end_pts are expressed in the VIDEO stream's timebase,
-    // which was stored at index time. Rescale to the subtitle stream's timebase.
     let video_tb = index.video_timebase;
+    let stream_timebase = sub_info.timebase;
+    let sub_start_time = sub_info.start_time;
 
-    // Calculate segment boundaries in the subtitle stream's timebase
-    let start_ts =
-        crate::ffmpeg::utils::rescale_ts(start_segment.start_pts, video_tb, stream_timebase);
-    let end_ts = crate::ffmpeg::utils::rescale_ts(end_segment.end_pts, video_tb, stream_timebase);
+    // Compute segment boundaries in the subtitle stream's timebase (playtime-relative)
+    // video_st is 0 for the purpose of playtime since start_pts already accounts for it.
+    let seg_start_playtime = start_segment.start_pts;
+    let seg_end_playtime = end_segment.end_pts;
 
-    // Seek to start position using AV_TIME_BASE (microseconds)
-    let seek_ts = if video_tb.denominator() != 0 {
-        start_segment.start_pts * 1_000_000 * video_tb.numerator() as i64
-            / video_tb.denominator() as i64
-    } else {
-        start_segment.start_pts * 1_000_000 / 90_000
-    };
-    let _ = input.seek(seek_ts, i64::MIN..seek_ts + 1); // non-fatal if seek fails
-
-    // Find video and subtitle stream start times to normalize playtimes
-    let video_st = input
-        .streams()
-        .into_iter()
-        .find(|s| crate::ffmpeg::utils::is_video_codec(s.parameters().id()))
-        .map(|s| {
-            let st = s.start_time();
-            if st == std::i64::MIN {
-                0
-            } else {
-                st
-            }
-        })
-        .unwrap_or(0);
-
-    let sub_st = {
-        let st = input.stream(track_index).unwrap().start_time();
-        if st == std::i64::MIN {
-            0
-        } else {
-            st
-        }
-    };
-
-    // Calculate segment playtimes (relative to beginning of video stream)
-    let seg_start_playtime = start_segment.start_pts.saturating_sub(video_st);
-    let seg_end_playtime = end_segment.end_pts.saturating_sub(video_st);
-
-    // Rescale playtimes to subtitle stream timebase
     let start_ts_playtime =
         crate::ffmpeg::utils::rescale_ts(seg_start_playtime, video_tb, stream_timebase);
     let end_ts_playtime =
         crate::ffmpeg::utils::rescale_ts(seg_end_playtime, video_tb, stream_timebase);
 
-    let extractor = SubtitleExtractor::new(codec_id, stream_timebase);
-    let mut cues = Vec::new();
-    let mut past_end = false;
-
-    // Calculate absolute segment bounds in milliseconds for clamping cues
+    // Segment bounds in milliseconds for clamping
     let seg_start_ms = crate::ffmpeg::utils::rescale_ts(
         start_segment.start_pts,
         video_tb,
@@ -589,45 +533,90 @@ pub fn generate_subtitle_segment(
         ffmpeg::Rational::new(1, 1000),
     );
 
-    for (stream, mut packet) in input.packets() {
-        if stream.index() != track_index {
+    // Binary-search the sample index for the first entry that could overlap
+    // the segment: find the first entry whose pts + (some duration) >= start.
+    // Since we don't store duration in the index, we use pts >= start - 10s
+    // as a conservative lower bound (subtitle cues are rarely > 10s long).
+    let search_start_ts = start_ts_playtime + sub_start_time
+        - crate::ffmpeg::utils::rescale_ts(10, ffmpeg::Rational::new(1, 1), stream_timebase);
+
+    let first_idx = sub_info
+        .sample_index
+        .partition_point(|s| s.pts < search_start_ts);
+
+    // Collect the subset of samples that fall within [start_ts_playtime, end_ts_playtime)
+    // expressed in the subtitle stream's absolute PTS space.
+    let abs_start = start_ts_playtime + sub_start_time;
+    let abs_end = end_ts_playtime + sub_start_time;
+
+    let matching: Vec<_> = sub_info.sample_index[first_idx..]
+        .iter()
+        .take_while(|s| s.pts < abs_end)
+        .collect();
+
+    if matching.is_empty() {
+        // No subtitle cues in this segment — return an empty WebVTT
+        let config = WebVttConfig { include_header_comment: false };
+        let mut writer = WebVttWriter::with_config(config);
+        return Ok(writer.write(&[]));
+    }
+
+    // Open the file once, then seek to each sample individually
+    let mut input = ffmpeg::format::input(&index.source_path)
+        .map_err(|e| HlsError::Ffmpeg(crate::error::FfmpegError::OpenInput(e.to_string())))?;
+
+    let extractor = SubtitleExtractor::new(sub_info.codec_id, stream_timebase);
+    let mut cues = Vec::new();
+
+    // video_st_in_sub_tb: used to align subtitle PTS to the video timeline
+    // (same logic as the old implementation)
+    let video_st = {
+        let st = index
+            .video_streams
+            .first()
+            .and_then(|v| input.stream(v.stream_index))
+            .map(|s| s.start_time())
+            .unwrap_or(0);
+        if st == std::i64::MIN { 0 } else { st }
+    };
+    let video_st_in_sub_tb =
+        crate::ffmpeg::utils::rescale_ts(video_st, video_tb, stream_timebase);
+
+    for sample in &matching {
+        // Seek directly to this sample's byte offset — one seek per cue
+        if let Err(e) = seek_to_byte_offset(&mut input, track_index as i32, sample.byte_offset) {
+            tracing::debug!("subtitle byte-seek failed (offset={}): {}", sample.byte_offset, e);
             continue;
         }
-        let pts = packet.pts().unwrap_or(0);
-        let duration = std::cmp::max(0, packet.duration());
-        let sub_playtime = pts.saturating_sub(sub_st);
-        let sub_end_playtime = sub_playtime + duration as i64;
 
-        if sub_playtime >= end_ts_playtime {
-            past_end = true;
-        }
-        if past_end {
+        // Read the next packet; it should be the subtitle sample we seeked to
+        for (stream, mut packet) in input.packets() {
+            if stream.index() != track_index {
+                // Skip non-subtitle packets that may appear after the seek
+                continue;
+            }
+
+            let pts = packet.pts().unwrap_or(sample.pts);
+            let sub_playtime = pts.saturating_sub(sub_start_time);
+            let aligned_pts = sub_playtime + video_st_in_sub_tb;
+            packet.set_pts(Some(aligned_pts));
+
+            match extractor.extract_cues(&packet) {
+                Ok(c) => cues.extend(c),
+                Err(e) => tracing::debug!(
+                    track_index,
+                    start_sequence,
+                    end_sequence,
+                    "subtitle cue extraction error (skipping): {}",
+                    e
+                ),
+            }
+            // Only read one subtitle packet per seek
             break;
-        }
-        if sub_end_playtime <= start_ts_playtime {
-            continue; // Skip packets that end before or exactly at the start of the segment
-        }
-
-        // Align the subtitle's PTS with the video's absolute PTS timeline.
-        // This ensures the extracted WebVTT timestamps match the video's tfdt timestamps.
-        let video_st_in_sub_tb =
-            crate::ffmpeg::utils::rescale_ts(video_st, video_tb, stream_timebase);
-        let aligned_pts = sub_playtime + video_st_in_sub_tb;
-        packet.set_pts(Some(aligned_pts));
-
-        match extractor.extract_cues(&packet) {
-            Ok(c) => cues.extend(c),
-            Err(e) => tracing::debug!(
-                track_index,
-                start_sequence,
-                end_sequence,
-                "subtitle cue extraction error (skipping): {}",
-                e
-            ),
         }
     }
 
-    // Clamp cue timestamps to strictly fit within the segment bounds
+    // Clamp cue timestamps to segment bounds
     for cue in &mut cues {
         if cue.start_ms < seg_start_ms {
             cue.start_ms = seg_start_ms;
@@ -636,14 +625,9 @@ pub fn generate_subtitle_segment(
             cue.end_ms = seg_end_ms;
         }
     }
-
-    // Filter out cues that were completely outside or reduced to <= 0 duration
     cues.retain(|cue| cue.start_ms < cue.end_ms);
 
-    // Build WebVTT output.
-    let config = WebVttConfig {
-        include_header_comment: false,
-    };
+    let config = WebVttConfig { include_header_comment: false };
     let mut writer = WebVttWriter::with_config(config);
     let bytes = writer.write(&cues);
 
@@ -709,27 +693,29 @@ fn generate_media_segment_ffmpeg(
     // during packet writing and finalization. We must strip it later.
     let _init_segment = muxer.write_header(true)?;
 
-    // Get video timebase for consistent segment boundary comparison and tfdt patching.
-    // Must be determined before seeking so we can convert start_pts to microseconds.
-    let video_timebase = index
-        .video_streams
-        .first()
-        .and_then(|v| input.stream(v.stream_index).map(|s| s.time_base()))
-        .unwrap_or(ffmpeg::Rational(1, 90000));
+    // Use the video timebase stored at index time — no need to re-read it from the file.
+    let video_timebase = index.video_timebase;
 
-    // Seek to start position
-    // segment.start_pts is in the video stream's native timebase.
-    // Convert to AV_TIME_BASE (microseconds) for seeking.
-    let seek_ts = if video_timebase.denominator() != 0 {
-        segment.start_pts * 1_000_000 * video_timebase.numerator() as i64
-            / video_timebase.denominator() as i64
+    // Seek to the segment start.
+    // For video segments we have the exact byte offset of the keyframe from the
+    // demuxer index, so we use a byte-seek which lands directly on the keyframe
+    // without any demuxer-internal forward scan.
+    // For audio segments (which share the same interleaved file) we fall back to
+    // a timestamp-based seek since audio samples don't have a stored byte offset.
+    if segment_type == "video" && segment.video_byte_offset > 0 {
+        crate::ffmpeg::index::seek_to_byte_offset(&mut input, stream_idx as i32, segment.video_byte_offset)
+            .map_err(|e| HlsError::Ffmpeg(crate::error::FfmpegError::ReadFrame(e)))?;
     } else {
-        segment.start_pts * 1_000_000 / 90_000
-    };
-
-    input
-        .seek(seek_ts, ..seek_ts)
-        .map_err(|e| HlsError::Ffmpeg(crate::error::FfmpegError::ReadFrame(e.to_string())))?;
+        let seek_ts = if video_timebase.denominator() != 0 {
+            segment.start_pts * 1_000_000 * video_timebase.numerator() as i64
+                / video_timebase.denominator() as i64
+        } else {
+            segment.start_pts * 1_000_000 / 90_000
+        };
+        input
+            .seek(seek_ts, ..seek_ts)
+            .map_err(|e| HlsError::Ffmpeg(crate::error::FfmpegError::ReadFrame(e.to_string())))?;
+    }
 
     // Iterate packets
     let mut _packet_count = 0;

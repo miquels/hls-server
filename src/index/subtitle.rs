@@ -20,12 +20,20 @@ pub fn analyze_subtitle_stream(
         return None;
     }
 
+    let mut start_time = stream.start_time();
+    if start_time == std::i64::MIN {
+        start_time = 0;
+    }
+
     Some(SubtitleStreamInfo {
         stream_index: index,
         codec_id,
         language: get_stream_language(stream),
         format: get_subtitle_format(codec_id),
         non_empty_sequences: Vec::new(), // populated by scanner
+        sample_index: Vec::new(),        // populated by scanner
+        timebase: stream.time_base(),
+        start_time,
     })
 }
 

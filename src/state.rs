@@ -46,6 +46,21 @@ pub struct AudioStreamInfo {
     pub source_stream_index: Option<usize>,
 }
 
+/// A reference to a single subtitle sample in the source file.
+/// Populated at index time from the demuxer's in-memory index (moov/cues).
+/// Allows seeking directly to the sample without scanning the file.
+#[derive(Debug, Clone)]
+pub struct SubtitleSampleRef {
+    /// Byte offset of this sample in the file.
+    pub byte_offset: u64,
+    /// Presentation timestamp in the subtitle stream's native timebase.
+    pub pts: i64,
+    /// Duration in the subtitle stream's native timebase (0 if unknown).
+    pub duration: i64,
+    /// Size of the sample payload in bytes.
+    pub size: i32,
+}
+
 /// Subtitle stream information
 #[derive(Debug, Clone)]
 pub struct SubtitleStreamInfo {
@@ -56,6 +71,13 @@ pub struct SubtitleStreamInfo {
     /// Video segment sequences that contain at least one subtitle packet.
     /// Empty means not yet determined (treat all as non-empty).
     pub non_empty_sequences: Vec<usize>,
+    /// Per-sample byte offsets extracted from the demuxer index at scan time.
+    /// Sorted by pts. Used to seek directly to each subtitle sample on request.
+    pub sample_index: Vec<SubtitleSampleRef>,
+    /// Timebase of this subtitle stream (stored at scan time to avoid re-opening).
+    pub timebase: ffmpeg::Rational,
+    /// start_time of this subtitle stream (stored at scan time).
+    pub start_time: i64,
 }
 
 /// Subtitle format enumeration
