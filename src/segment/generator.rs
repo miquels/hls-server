@@ -1,0 +1,1324 @@
+//! Segment generator - uses FFmpeg CLI for reliable segment generation
+
+use bytes::Bytes;
+use std::path::Path;
+
+use crate::error::{HlsError, Result};
+use crate::segment::muxer::Fmp4Muxer;
+use crate::state::{SegmentInfo, StreamIndex};
+use ffmpeg_next::{self as ffmpeg, Rescale};
+
+/// Generate an initialization segment (init.mp4)
+pub fn generate_init_segment(index: &StreamIndex) -> Result<Bytes> {
+    let input = ffmpeg::format::input(&index.source_path)
+        .map_err(|e| HlsError::Ffmpeg(crate::error::FfmpegError::OpenInput(e.to_string())))?;
+
+    let mut muxer = Fmp4Muxer::new()?;
+
+    // Copy all video and audio streams
+    // Note: We need to iterate by index to map correctly
+    for stream in input.streams() {
+        let params = stream.parameters();
+        let codec_id = params.id();
+        let index = stream.index();
+
+        if crate::ffmpeg::utils::is_video_codec(codec_id) {
+            muxer.add_video_stream(&params, index)?;
+        } else if crate::ffmpeg::utils::is_audio_codec(codec_id) {
+            muxer.add_audio_stream(&params, index)?;
+        }
+    }
+
+    let mut data = muxer.write_header(false)?;
+
+    // Fix default_sample_duration in trex boxes
+    // For mixed content, 1024 is a reasonable safe default, though not perfect for video
+    // But this function is primarily used for specific stream types now
+    fix_trex_durations(&mut data, 1024);
+
+    Ok(Bytes::from(data))
+}
+
+/// Generate a video-only initialization segment
+pub fn generate_video_init_segment(index: &StreamIndex) -> Result<Bytes> {
+    if index.video_streams.is_empty() {
+        return Err(HlsError::NoVideoStream);
+    }
+
+    let input = ffmpeg::format::input(&index.source_path)
+        .map_err(|e| HlsError::Ffmpeg(crate::error::FfmpegError::OpenInput(e.to_string())))?;
+
+    let mut muxer = Fmp4Muxer::new()?;
+
+    for stream in input.streams() {
+        let params = stream.parameters();
+        let codec_id = params.id();
+        let index = stream.index();
+
+        if crate::ffmpeg::utils::is_video_codec(codec_id) {
+            muxer.add_video_stream(&params, index)?;
+        }
+    }
+
+    let mut data = muxer.write_header(false)?;
+
+    // Calculate default duration (ticks) for video
+    // Assume 90kHz timescale for video
+    let mut default_duration = 3000; // Default fallback (30fps)
+
+    if let Some(video_info) = index.video_streams.first() {
+        let fps = video_info.framerate;
+        if fps.numerator() > 0 {
+            // Duration = 90000 / fps
+            // fps = num / den
+            // Duration = 90000 * den / num
+            default_duration = (90000 * fps.denominator() as u64 / fps.numerator() as u64) as u32;
+        }
+    }
+
+    fix_trex_durations(&mut data, default_duration);
+
+    Ok(Bytes::from(data))
+}
+
+/// Generate an audio-only initialization segment for a specific track
+///
+/// For tracks that need transcoding (non-AAC), the init segment is produced
+/// from the AAC encoder's codec parameters, not the source stream.
+pub fn generate_audio_init_segment(
+    index: &StreamIndex,
+    track_index: usize,
+    force_aac: bool,
+) -> Result<Bytes> {
+    use crate::transcode::encoder::{get_recommended_bitrate, AacEncoder};
+    use crate::transcode::pipeline::needs_transcoding;
+    use crate::transcode::resampler::HLS_SAMPLE_RATE;
+
+    // Check if this audio track needs transcoding
+    let audio_info = index
+        .audio_streams
+        .iter()
+        .find(|a| a.stream_index == track_index);
+
+    if let Some(info) = audio_info {
+        if force_aac || needs_transcoding(info) {
+            // Build an init segment with AAC codec parameters
+            let bitrate = get_recommended_bitrate(info.channels);
+            let encoder = AacEncoder::open(HLS_SAMPLE_RATE, 2, bitrate)?;
+
+            let mut muxer = Fmp4Muxer::new()?;
+            muxer.add_audio_stream(&encoder.codec_parameters(), track_index)?;
+
+            let mut data = muxer.write_header(false)?;
+            fix_trex_durations(&mut data, 1024);
+            return Ok(Bytes::from(data));
+        }
+    }
+
+    // Source is already Native (AAC, AC3, Opus) — copy parameters directly
+    let mut input = ffmpeg::format::input(&index.source_path)
+        .map_err(|e| HlsError::Ffmpeg(crate::error::FfmpegError::OpenInput(e.to_string())))?;
+
+    let mut muxer = Fmp4Muxer::new()?;
+
+    let stream = input
+        .stream(track_index)
+        .ok_or(HlsError::StreamNotFound(format!("Stream {}", track_index)))?;
+
+    if !crate::ffmpeg::utils::is_audio_codec(stream.parameters().id()) {
+        return Err(HlsError::Muxing(format!(
+            "Stream {} is not an audio stream",
+            track_index
+        )));
+    }
+
+    muxer.add_audio_stream(&stream.parameters(), track_index)?;
+
+    // Find the first packet for this stream to provide bitstream info
+    // essential for writing the moov atom (especially for AC-3)
+    let mut first_packet = None;
+    for (s, mut pkt) in input.packets() {
+        if s.index() == track_index {
+            let input_tb = s.time_base();
+            if let Some(output_tb) = muxer.get_output_timebase(track_index) {
+                pkt.rescale_ts(input_tb, output_tb);
+            }
+            first_packet = Some(pkt);
+            break;
+        }
+    }
+
+    let mut data = if let Some(mut pkt) = first_packet {
+        muxer
+            .generate_init_segment_with_packet(&mut pkt)
+            .map_err(|e| {
+                HlsError::Muxing(format!("Failed to generate init segment via packet: {}", e))
+            })?
+    } else {
+        // Fallback for empty streams
+        muxer.write_header(false)?
+    };
+
+    fix_trex_durations(&mut data, 1024);
+
+    Ok(Bytes::from(data))
+}
+
+/// Fix default_sample_duration in trex boxes
+/// FFmpeg with stream copy sets duration to 1, but players need reasonable values
+fn fix_trex_durations(data: &mut Vec<u8>, duration: u32) {
+    // Find mvex box
+    let mvex_pos = match data.windows(4).position(|w| w == b"mvex") {
+        Some(pos) => pos,
+        None => return,
+    };
+
+    if mvex_pos < 4 {
+        return;
+    }
+
+    let mvex_start = mvex_pos - 4;
+    let mvex_size = u32::from_be_bytes([
+        data[mvex_start],
+        data[mvex_start + 1],
+        data[mvex_start + 2],
+        data[mvex_start + 3],
+    ]) as usize;
+
+    let mvex_end = mvex_start + mvex_size;
+
+    if mvex_end > data.len() {
+        return;
+    }
+
+    // Find trex boxes inside mvex
+    // mvex header is 8 bytes (Size, Type). No flags.
+    let mut pos = mvex_pos + 4;
+
+    while pos + 8 <= mvex_end {
+        let size =
+            u32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
+
+        if size < 8 || pos + size > mvex_end {
+            break;
+        }
+
+        if data[pos + 4..pos + 8] == *b"trex" {
+            // Set default_sample_duration (offset 20)
+            if size >= 24 {
+                data[pos + 20..pos + 24].copy_from_slice(&duration.to_be_bytes());
+            }
+        }
+
+        pos += size;
+    }
+}
+
+/// Patch tfdt.baseMediaDecodeTime and mfhd.FragmentSequenceNumber in media segment data.
+///
+/// Sets all tfdt boxes so the first one matches `target_time` and subsequent
+/// ones are adjusted by the same delta (preserving relative offsets for
+/// multi-fragment segments). Also patches mfhd sequence numbers starting from
+/// `start_frag_seq`.
+fn patch_tfdts(media_data: &mut Vec<u8>, target_time: u64, start_frag_seq: u32) {
+    let mut pos = 0;
+    let mut tfdt_delta: Option<i64> = None;
+    let mut frag_count = 0;
+
+    while pos + 8 <= media_data.len() {
+        let size = u32::from_be_bytes(media_data[pos..pos + 4].try_into().unwrap()) as usize;
+        if size == 0 {
+            break;
+        }
+        if &media_data[pos + 4..pos + 8] == b"moof" {
+            let moof_end = (pos + size).min(media_data.len());
+            let mut moof_pos = pos + 8;
+            let current_frag_seq = start_frag_seq.wrapping_add(frag_count);
+            frag_count += 1;
+
+            while moof_pos + 8 <= moof_end {
+                let child_size =
+                    u32::from_be_bytes(media_data[moof_pos..moof_pos + 4].try_into().unwrap())
+                        as usize;
+                if child_size == 0 {
+                    break;
+                }
+                if &media_data[moof_pos + 4..moof_pos + 8] == b"mfhd" {
+                    if moof_pos + 16 <= media_data.len() {
+                        media_data[moof_pos + 12..moof_pos + 16]
+                            .copy_from_slice(&current_frag_seq.to_be_bytes());
+                    }
+                } else if &media_data[moof_pos + 4..moof_pos + 8] == b"traf" {
+                    let traf_end = (moof_pos + child_size).min(moof_end);
+                    let mut traf_pos = moof_pos + 8;
+                    while traf_pos + 8 <= traf_end {
+                        let sub_size = u32::from_be_bytes(
+                            media_data[traf_pos..traf_pos + 4].try_into().unwrap(),
+                        ) as usize;
+                        if sub_size == 0 {
+                            break;
+                        }
+                        if &media_data[traf_pos + 4..traf_pos + 8] == b"tfdt" {
+                            let version = media_data[traf_pos + 8];
+                            let (current_tfdt, value_offset) =
+                                if version == 1 && traf_pos + 20 <= media_data.len() {
+                                    (
+                                        u64::from_be_bytes(
+                                            media_data[traf_pos + 12..traf_pos + 20]
+                                                .try_into()
+                                                .unwrap(),
+                                        ),
+                                        12,
+                                    )
+                                } else if traf_pos + 16 <= media_data.len() {
+                                    (
+                                        u32::from_be_bytes(
+                                            media_data[traf_pos + 12..traf_pos + 16]
+                                                .try_into()
+                                                .unwrap(),
+                                        ) as u64,
+                                        12,
+                                    )
+                                } else {
+                                    (0, 0)
+                                };
+
+                            if value_offset > 0 {
+                                if tfdt_delta.is_none() {
+                                    tfdt_delta = Some(target_time as i64 - current_tfdt as i64);
+                                }
+                                let new_tfdt = (current_tfdt as i64 + tfdt_delta.unwrap()) as u64;
+                                if version == 1 {
+                                    media_data[traf_pos + 12..traf_pos + 20]
+                                        .copy_from_slice(&new_tfdt.to_be_bytes());
+                                } else {
+                                    media_data[traf_pos + 12..traf_pos + 16]
+                                        .copy_from_slice(&(new_tfdt as u32).to_be_bytes());
+                                }
+                            }
+                        }
+                        traf_pos += sub_size;
+                    }
+                }
+                moof_pos += child_size;
+            }
+        }
+        pos += size;
+    }
+}
+
+/// Generate a video segment
+pub fn generate_video_segment(
+    index: &StreamIndex,
+    track_index: usize,
+    sequence: usize,
+    _source_path: &Path,
+) -> Result<Bytes> {
+    let segment = index
+        .segments
+        .iter()
+        .find(|s| s.sequence == sequence)
+        .ok_or_else(|| HlsError::SegmentNotFound {
+            stream_id: index.stream_id.clone(),
+            segment_type: "video".to_string(),
+            sequence,
+        })?;
+
+    generate_media_segment_ffmpeg(
+        &index.source_path,
+        segment,
+        "video",
+        Some(track_index),
+        index,
+    )
+}
+
+/// Generate an audio segment
+///
+/// Dispatches to the transcoding pipeline for non-AAC streams; falls back to
+/// direct packet copy for AAC streams.
+pub fn generate_audio_segment(
+    index: &StreamIndex,
+    track_index: usize,
+    sequence: usize,
+    _source_path: &Path,
+    force_aac: bool,
+) -> Result<Bytes> {
+    use crate::transcode::pipeline::needs_transcoding;
+
+    let segment = index
+        .segments
+        .iter()
+        .find(|s| s.sequence == sequence)
+        .ok_or_else(|| HlsError::SegmentNotFound {
+            stream_id: index.stream_id.clone(),
+            segment_type: "audio".to_string(),
+            sequence,
+        })?;
+
+    // Check if this track needs transcoding
+    let needs_transcode = index
+        .audio_streams
+        .iter()
+        .find(|a| a.stream_index == track_index)
+        .map(|a| needs_transcoding(a))
+        .unwrap_or(false);
+
+    if force_aac || needs_transcode {
+        let audio_info = index
+            .audio_streams
+            .iter()
+            .find(|a| a.stream_index == track_index)
+            .ok_or_else(|| {
+                HlsError::StreamNotFound(format!("audio stream {} not found", track_index))
+            })?;
+
+        generate_transcoded_audio_segment(index, audio_info, segment)
+    } else {
+        generate_media_segment_ffmpeg(
+            &index.source_path,
+            segment,
+            "audio",
+            Some(track_index),
+            index,
+        )
+    }
+}
+
+/// Generate an audio segment by transcoding (decode → resample → AAC encode → fMP4 mux)
+fn generate_transcoded_audio_segment(
+    index: &StreamIndex,
+    audio_info: &crate::state::AudioStreamInfo,
+    segment: &SegmentInfo,
+) -> Result<Bytes> {
+    use crate::transcode::pipeline::transcode_audio_segment;
+    use crate::transcode::resampler::HLS_SAMPLE_RATE;
+
+    // Determine video timebase (same as what the scanner uses for segment boundaries)
+    let video_timebase = index
+        .video_streams
+        .first()
+        .and_then(|v| {
+            ffmpeg::format::input(&index.source_path)
+                .ok()
+                .and_then(|input| input.stream(v.stream_index).map(|s| s.time_base()))
+        })
+        .unwrap_or(ffmpeg::Rational(1, 90000));
+
+    // Run the full transcode pipeline
+    let (aac_packets, output_timebase) =
+        transcode_audio_segment(&index.source_path, audio_info, segment, video_timebase)?;
+
+    if aac_packets.is_empty() {
+        tracing::warn!(
+            seq = segment.sequence,
+            codec = ?audio_info.codec_id,
+        "Audio transcoding produced 0 packets - returning empty segment"
+        );
+        // Return a minimal empty fMP4 rather than a 500 so the player skips
+        // this segment gracefully instead of retrying forever.
+        return Err(HlsError::Muxing(format!(
+            "Audio transcoding produced no packets for segment {} (codec={:?})",
+            segment.sequence, audio_info.codec_id
+        )));
+    }
+
+    // Mux the AAC packets into an fMP4 segment using frag_every_frame so each
+    // write_packet call emits a moof+mdat immediately (audio-only has no video
+    // keyframes to trigger fragmentation, so frag_keyframe doesn't work here).
+    use crate::segment::muxer::mux_aac_packets_to_fmp4;
+    use crate::transcode::encoder::{get_recommended_bitrate, AacEncoder};
+    let bitrate = get_recommended_bitrate(audio_info.channels);
+    let encoder = AacEncoder::open(HLS_SAMPLE_RATE, 2, bitrate)?;
+
+    let full_data = mux_aac_packets_to_fmp4(&encoder.codec_parameters(), aac_packets)?;
+
+    // Strip the init segment, return only the media segment
+    use crate::segment::muxer::find_media_segment_offset;
+    let media_offset = find_media_segment_offset(&full_data).ok_or_else(|| {
+        HlsError::Muxing("Transcoded audio: no media segment found (moof/styp missing)".to_string())
+    })?;
+
+    let mut media_data = full_data[media_offset..].to_vec();
+
+    // Patch tfdt with the correct segment start time
+    // We strictly align target_time to the 1024-sample grid (the AAC frame size)
+    // so that consecutive fragments do not accumulate decimal rounding errors or drift.
+    let target_time = {
+        let exact_target =
+            crate::ffmpeg::utils::rescale_ts(segment.start_pts, video_timebase, output_timebase)
+                .max(0) as u64;
+
+        let grid_size = 1024;
+        (exact_target / grid_size) * grid_size
+    };
+
+    patch_tfdts(
+        &mut media_data,
+        target_time,
+        (segment.sequence as u32).wrapping_add(1),
+    );
+
+    Ok(Bytes::from(media_data))
+}
+
+/// Generate a subtitle segment (WebVTT)
+pub fn generate_subtitle_segment(
+    index: &StreamIndex,
+    track_index: usize,
+    start_sequence: usize,
+    end_sequence: usize,
+    _source_path: &Path,
+) -> Result<Bytes> {
+    use crate::subtitle::decoder::is_bitmap_subtitle_codec;
+    use crate::subtitle::extractor::SubtitleExtractor;
+    use crate::subtitle::webvtt::{WebVttConfig, WebVttWriter};
+
+    let start_segment = index
+        .segments
+        .iter()
+        .find(|s| s.sequence == start_sequence)
+        .ok_or_else(|| HlsError::SegmentNotFound {
+            stream_id: index.stream_id.clone(),
+            segment_type: "subtitle".to_string(),
+            sequence: start_sequence,
+        })?;
+
+    let end_segment = index
+        .segments
+        .iter()
+        .find(|s| s.sequence == end_sequence)
+        .ok_or_else(|| HlsError::SegmentNotFound {
+            stream_id: index.stream_id.clone(),
+            segment_type: "subtitle".to_string(),
+            sequence: end_sequence,
+        })?;
+
+    // Find the subtitle stream metadata
+    let sub_info = index
+        .subtitle_streams
+        .iter()
+        .find(|s| s.stream_index == track_index)
+        .ok_or_else(|| {
+            HlsError::StreamNotFound(format!("subtitle stream {} not found", track_index))
+        })?;
+
+    // Bitmap subtitles (PGS, DVB, XSUB) cannot be converted to WebVTT
+    if is_bitmap_subtitle_codec(sub_info.codec_id) {
+        return Err(HlsError::Muxing(format!(
+            "Subtitle stream {} uses a bitmap codec ({:?}) which cannot be converted to WebVTT",
+            track_index, sub_info.codec_id
+        )));
+    }
+
+    // Open source file
+    let mut input = ffmpeg::format::input(&index.source_path)
+        .map_err(|e| HlsError::Ffmpeg(crate::error::FfmpegError::OpenInput(e.to_string())))?;
+
+    // Find stream + timebase
+    let (stream_timebase, codec_id) = input
+        .stream(track_index)
+        .map(|s| (s.time_base(), s.parameters().id()))
+        .ok_or_else(|| HlsError::StreamNotFound(format!("stream {} not in file", track_index)))?;
+
+    // segment.start_pts / end_pts are expressed in the VIDEO stream's timebase,
+    // which was stored at index time. Rescale to the subtitle stream's timebase.
+    let video_tb = index.video_timebase;
+
+    // Calculate segment boundaries in the subtitle stream's timebase
+    let start_ts =
+        crate::ffmpeg::utils::rescale_ts(start_segment.start_pts, video_tb, stream_timebase);
+    let end_ts = crate::ffmpeg::utils::rescale_ts(end_segment.end_pts, video_tb, stream_timebase);
+
+    // Seek to start position using AV_TIME_BASE (microseconds)
+    let seek_ts = if video_tb.denominator() != 0 {
+        start_segment.start_pts * 1_000_000 * video_tb.numerator() as i64
+            / video_tb.denominator() as i64
+    } else {
+        start_segment.start_pts * 1_000_000 / 90_000
+    };
+    let _ = input.seek(seek_ts, i64::MIN..seek_ts + 1); // non-fatal if seek fails
+
+    // Find video and subtitle stream start times to normalize playtimes
+    let video_st = input
+        .streams()
+        .into_iter()
+        .find(|s| crate::ffmpeg::utils::is_video_codec(s.parameters().id()))
+        .map(|s| {
+            let st = s.start_time();
+            if st == std::i64::MIN {
+                0
+            } else {
+                st
+            }
+        })
+        .unwrap_or(0);
+
+    let sub_st = {
+        let st = input.stream(track_index).unwrap().start_time();
+        if st == std::i64::MIN {
+            0
+        } else {
+            st
+        }
+    };
+
+    // Calculate segment playtimes (relative to beginning of video stream)
+    let seg_start_playtime = start_segment.start_pts.saturating_sub(video_st);
+    let seg_end_playtime = end_segment.end_pts.saturating_sub(video_st);
+
+    // Rescale playtimes to subtitle stream timebase
+    let start_ts_playtime =
+        crate::ffmpeg::utils::rescale_ts(seg_start_playtime, video_tb, stream_timebase);
+    let end_ts_playtime =
+        crate::ffmpeg::utils::rescale_ts(seg_end_playtime, video_tb, stream_timebase);
+
+    let extractor = SubtitleExtractor::new(codec_id, stream_timebase);
+    let mut cues = Vec::new();
+    let mut past_end = false;
+
+    // Calculate absolute segment bounds in milliseconds for clamping cues
+    let seg_start_ms = crate::ffmpeg::utils::rescale_ts(
+        start_segment.start_pts,
+        video_tb,
+        ffmpeg::Rational::new(1, 1000),
+    );
+    let seg_end_ms = crate::ffmpeg::utils::rescale_ts(
+        end_segment.end_pts,
+        video_tb,
+        ffmpeg::Rational::new(1, 1000),
+    );
+
+    for (stream, mut packet) in input.packets() {
+        if stream.index() != track_index {
+            continue;
+        }
+        let pts = packet.pts().unwrap_or(0);
+        let duration = std::cmp::max(0, packet.duration());
+        let sub_playtime = pts.saturating_sub(sub_st);
+        let sub_end_playtime = sub_playtime + duration as i64;
+
+        if sub_playtime >= end_ts_playtime {
+            past_end = true;
+        }
+        if past_end {
+            break;
+        }
+        if sub_end_playtime <= start_ts_playtime {
+            continue; // Skip packets that end before or exactly at the start of the segment
+        }
+
+        // Align the subtitle's PTS with the video's absolute PTS timeline.
+        // This ensures the extracted WebVTT timestamps match the video's tfdt timestamps.
+        let video_st_in_sub_tb =
+            crate::ffmpeg::utils::rescale_ts(video_st, video_tb, stream_timebase);
+        let aligned_pts = sub_playtime + video_st_in_sub_tb;
+        packet.set_pts(Some(aligned_pts));
+
+        match extractor.extract_cues(&packet) {
+            Ok(c) => cues.extend(c),
+            Err(e) => tracing::debug!(
+                track_index,
+                start_sequence,
+                end_sequence,
+                "subtitle cue extraction error (skipping): {}",
+                e
+            ),
+        }
+    }
+
+    // Clamp cue timestamps to strictly fit within the segment bounds
+    for cue in &mut cues {
+        if cue.start_ms < seg_start_ms {
+            cue.start_ms = seg_start_ms;
+        }
+        if cue.end_ms > seg_end_ms {
+            cue.end_ms = seg_end_ms;
+        }
+    }
+
+    // Filter out cues that were completely outside or reduced to <= 0 duration
+    cues.retain(|cue| cue.start_ms < cue.end_ms);
+
+    // Build WebVTT output.
+    let config = WebVttConfig {
+        include_header_comment: false,
+    };
+    let mut writer = WebVttWriter::with_config(config);
+    let bytes = writer.write(&cues);
+
+    tracing::debug!(
+        track_index,
+        start_sequence,
+        end_sequence,
+        cues = cues.len(),
+        "generate_subtitle_segment: done"
+    );
+
+    Ok(bytes)
+}
+
+/// Generate a media segment using FFmpeg (CMAF-style fragmented MP4)
+fn generate_media_segment_ffmpeg(
+    source_path: &Path,
+    segment: &SegmentInfo,
+    segment_type: &str,
+    target_track_index: Option<usize>,
+    index: &StreamIndex,
+) -> Result<Bytes> {
+    let mut input = ffmpeg::format::input(&source_path)
+        .map_err(|e| HlsError::Ffmpeg(crate::error::FfmpegError::OpenInput(e.to_string())))?;
+
+    let mut muxer = Fmp4Muxer::new()?;
+    // We create a new muxer for each segment, which writes an init segment (header).
+    // We will strip the init segment and returns only the fragments.
+    // However, Fmp4Muxer writes header upon write_header call.
+
+    // Find relevant stream
+    let mut stream_index = None;
+    for stream in input.streams() {
+        let params = stream.parameters();
+        let codec_id = params.id();
+        let idx = stream.index();
+
+        if let Some(target) = target_track_index {
+            if idx != target {
+                continue;
+            }
+        }
+
+        let is_video = segment_type == "video" && crate::ffmpeg::utils::is_video_codec(codec_id);
+        let is_audio = segment_type == "audio" && crate::ffmpeg::utils::is_audio_codec(codec_id);
+
+        if is_video {
+            muxer.add_video_stream(&params, idx)?;
+            stream_index = Some(idx);
+            break;
+        } else if is_audio {
+            muxer.add_audio_stream(&params, idx)?;
+            stream_index = Some(idx);
+            break;
+        }
+    }
+
+    let stream_idx = stream_index
+        .ok_or_else(|| HlsError::StreamNotFound(format!("No {} stream found", segment_type)))?;
+
+    // Write header
+    // Fmp4Muxer now retains the header in the buffer to allow correct seeking/updating
+    // during packet writing and finalization. We must strip it later.
+    let _init_segment = muxer.write_header(true)?;
+
+    // Get video timebase for consistent segment boundary comparison and tfdt patching.
+    // Must be determined before seeking so we can convert start_pts to microseconds.
+    let video_timebase = index
+        .video_streams
+        .first()
+        .and_then(|v| input.stream(v.stream_index).map(|s| s.time_base()))
+        .unwrap_or(ffmpeg::Rational(1, 90000));
+
+    // Seek to start position
+    // segment.start_pts is in the video stream's native timebase.
+    // Convert to AV_TIME_BASE (microseconds) for seeking.
+    let seek_ts = if video_timebase.denominator() != 0 {
+        segment.start_pts * 1_000_000 * video_timebase.numerator() as i64
+            / video_timebase.denominator() as i64
+    } else {
+        segment.start_pts * 1_000_000 / 90_000
+    };
+
+    input
+        .seek(seek_ts, ..seek_ts)
+        .map_err(|e| HlsError::Ffmpeg(crate::error::FfmpegError::ReadFrame(e.to_string())))?;
+
+    // Iterate packets
+    let mut _packet_count = 0;
+    // Track the rescaled DTS of the first packet we write. We use this exact value
+    // to patch tfdt.baseMediaDecodeTime after the muxer finalizes, so that the
+    // tfdt value is identical to what FFmpeg encodes in the trun table for the
+    // first sample — no rounding discrepancy, no "Decreasing DTS" errors.
+    let mut first_packet_dts: Option<i64> = None;
+    for (stream, mut packet) in input.packets() {
+        if stream.index() != stream_idx {
+            continue;
+        }
+
+        let pts = packet.pts().or(packet.dts()).unwrap_or(0);
+        let timebase = stream.time_base();
+
+        // Convert current packet PTS to 90kHz for comparison
+        let pts_90k = crate::ffmpeg::utils::rescale_ts(pts, timebase, ffmpeg::Rational(1, 90000));
+        // Convert segment boundaries (which are in video_timebase) to 90kHz
+        let start_pts_90k = crate::ffmpeg::utils::rescale_ts(
+            segment.start_pts,
+            video_timebase,
+            ffmpeg::Rational(1, 90000),
+        );
+        let end_pts_90k = crate::ffmpeg::utils::rescale_ts(
+            segment.end_pts,
+            video_timebase,
+            ffmpeg::Rational(1, 90000),
+        );
+
+        tracing::trace!(
+            "Read packet: pts_90k={}, start_pts_90k={}, end_pts_90k={}",
+            pts_90k,
+            start_pts_90k,
+            end_pts_90k
+        );
+
+        // Check if we reached the end
+        if pts_90k >= end_pts_90k {
+            tracing::debug!(
+                "Reached segment end (pts_90k={}, end_pts_90k={}), stopping",
+                pts_90k,
+                end_pts_90k
+            );
+            break;
+        }
+
+        // Filter packets before start (due to seek inaccuracy)
+        if pts_90k < start_pts_90k {
+            continue;
+        }
+
+        // Rescale packet timestamps to output stream timebase
+        if let Some(out_tb) = muxer.get_output_timebase(stream.index()) {
+            let in_tb = stream.time_base();
+            if let Some(pts) = packet.pts() {
+                let out_pts = pts.rescale(in_tb, out_tb);
+                packet.set_pts(Some(out_pts));
+                if let Some(dts) = packet.dts() {
+                    let out_dts = dts.rescale(in_tb, out_tb);
+                    packet.set_dts(Some(out_dts));
+                    // Capture the first-packet DTS (must be the same value FFmpeg
+                    // will use as the fragment base in its trun table).
+                    if first_packet_dts.is_none() {
+                        first_packet_dts = Some(out_dts);
+                    }
+                } else if first_packet_dts.is_none() {
+                    // Fallback: use rescaled PTS if DTS is absent
+                    first_packet_dts = Some(out_pts);
+                }
+
+                // Keep the trace log for detailed debugging if needed
+                tracing::debug!(
+                    "Pkt: InTB={:?}, OutTB={:?}, InPts={:?}, OutPts={:?}, InDts={:?}, OutDts={:?}, Dur={:?}, SegStart={:?}",
+                    in_tb,
+                    out_tb,
+                    pts,
+                    out_pts,
+                    packet.dts(),
+                    packet.dts().map(|d| d.rescale(in_tb, out_tb)),
+                    packet.duration(),
+                    segment.start_pts
+                );
+            }
+            _packet_count += 1;
+        }
+
+        muxer.write_packet(&mut packet)?;
+    }
+
+    // Finalize
+    let full_data = muxer.finalize()?;
+
+    // Use robust offset detection to find start of media segment
+    // This handles cases where init segment size might change due to seeking/writing
+    use crate::segment::muxer::find_media_segment_offset;
+
+    let media_offset = find_media_segment_offset(&full_data).ok_or_else(|| {
+        HlsError::Muxing("No media segment data found (moof/styp missing)".to_string())
+    })?;
+
+    // We want only the media segment (moof + mdat)
+    let mut media_data = full_data[media_offset..].to_vec();
+
+    // Patch tfdt.baseMediaDecodeTime with the segment's declared start time,
+    // not with first_packet_dts.
+    //
+    // Using `first_packet_dts` was intended to match the trun base-DTS exactly,
+    // but it has two problems:
+    //
+    //  1. For H.264/HEVC with B-frames, the DTS of the first packet in a segment
+    //     is always earlier than the segment's PTS boundary by (B_depth × frame_dur).
+    //     e.g. for 2-B-frame 30fps video at 90kHz: first_dts = start_pts - 2×3000 = -6000
+    //     at segment 0 (wraps to ~2^64 as u64) or = 354000 at segment 1 rather than 360000.
+    //
+    //  2. Validators (including mediastreamvalidator) measure segment duration and
+    //     continuity from consecutive tfdt values, so the tfdt MUST reflect the
+    //     segment's intended timeline position, not the B-frame-shifted DTS.
+    //
+    // Anchoring to `segment.start_pts` (rescaled from the source video timebase to
+    // 90 kHz) guarantees:
+    //   • tfdt is always ≥ 0  (no negative-wraparound to 2^64)
+    //   • tfdt values are strictly increasing across segments
+    //   • tfdt matches the #EXT-X-PROGRAM-DATE-TIME / playlist timing
+    // Patch tfdt.baseMediaDecodeTime.
+    // We calculate the delta between the desired start time (target_time) and the
+    // first tfdt value we encounter. We then apply this delta to ALL tfdt boxes in the file.
+    // This handles cases where FFmpeg produces multiple fragments (moof) per segment;
+    // resetting all of them to `target_time` would cause timestamp resets (Decreasing DTS).
+    if let Some(_base_dts) = first_packet_dts {
+        // Determine the target timebase for tfdt.
+        // For video, it's usually 90kHz (HLS standard).
+        // For audio, it's the sample rate (e.g. 48000, 44100).
+        // We must use the timebase that the MUXER used for writing packets, otherwise
+        // we'll patch a 90kHz value into a 48kHz track or vice-versa.
+        let output_timebase = muxer.get_output_timebase(stream_idx).unwrap_or_else(|| {
+            if segment_type == "video" {
+                ffmpeg::Rational(1, 90000)
+            } else {
+                // Fallback for audio if unknown? detailed in scanner?
+                // Best guess: 1/sample_rate, but let's default to video_timebase if fails
+                video_timebase
+            }
+        });
+
+        tracing::debug!(
+            "Patching tfdt with timebase: {}/{}",
+            output_timebase.numerator(),
+            output_timebase.denominator()
+        );
+
+        // Calculate target time in the OUTPUT timebase
+        let target_time = crate::ffmpeg::utils::rescale_ts(
+            segment.start_pts,
+            video_timebase, // source is always video timebase (from scanner)
+            output_timebase,
+        )
+        .max(0) as u64;
+
+        // mfhd.FragmentSequenceNumber must be monotonically increasing.
+        // We start with the segment sequence (shifted to avoid collision if possible,
+        // but for HLS 1-segment-per-file, strictly 1-based index is fine).
+        // Since we try to enforce single-fragment, we'll just increment if we see multiple.
+        let start_frag_seq = (segment.sequence as u32).wrapping_add(1);
+
+        let mut pos = 0;
+        let mut tfdt_delta: Option<i64> = None;
+        let mut frag_count = 0;
+
+        while pos + 8 <= media_data.len() {
+            let size = u32::from_be_bytes(media_data[pos..pos + 4].try_into().unwrap()) as usize;
+            if size == 0 {
+                break;
+            }
+            let type_bytes = &media_data[pos + 4..pos + 8];
+            if type_bytes == b"moof" {
+                let moof_end = (pos + size).min(media_data.len());
+                let mut moof_pos = pos + 8;
+
+                // Current fragment sequence to write
+                let current_frag_seq = start_frag_seq.wrapping_add(frag_count);
+                frag_count += 1;
+
+                while moof_pos + 8 <= moof_end {
+                    let child_size =
+                        u32::from_be_bytes(media_data[moof_pos..moof_pos + 4].try_into().unwrap())
+                            as usize;
+                    if child_size == 0 {
+                        break;
+                    }
+                    if &media_data[moof_pos + 4..moof_pos + 8] == b"mfhd" {
+                        // mfhd: size(4) + type(4) + version/flags(4) + seq(4)
+                        if moof_pos + 16 <= media_data.len() {
+                            media_data[moof_pos + 12..moof_pos + 16]
+                                .copy_from_slice(&current_frag_seq.to_be_bytes());
+                            tracing::debug!(
+                                "[mfhd] Patched FragmentSequenceNumber={} (seg_seq={}, frag_idx={})",
+                                current_frag_seq, segment.sequence, frag_count - 1
+                            );
+                        }
+                    } else if &media_data[moof_pos + 4..moof_pos + 8] == b"traf" {
+                        let traf_end = (moof_pos + child_size).min(moof_end);
+                        let mut traf_pos = moof_pos + 8;
+                        while traf_pos + 8 <= traf_end {
+                            let sub_size = u32::from_be_bytes(
+                                media_data[traf_pos..traf_pos + 4].try_into().unwrap(),
+                            ) as usize;
+                            if sub_size == 0 {
+                                break;
+                            }
+                            if &media_data[traf_pos + 4..traf_pos + 8] == b"tfdt" {
+                                let version = media_data[traf_pos + 8];
+                                let (current_tfdt, value_offset) =
+                                    if version == 1 && traf_pos + 20 <= media_data.len() {
+                                        (
+                                            u64::from_be_bytes(
+                                                media_data[traf_pos + 12..traf_pos + 20]
+                                                    .try_into()
+                                                    .unwrap(),
+                                            ),
+                                            12,
+                                        )
+                                    } else if traf_pos + 16 <= media_data.len() {
+                                        (
+                                            u32::from_be_bytes(
+                                                media_data[traf_pos + 12..traf_pos + 16]
+                                                    .try_into()
+                                                    .unwrap(),
+                                            ) as u64,
+                                            12,
+                                        )
+                                    } else {
+                                        (0, 0)
+                                    };
+
+                                if value_offset > 0 {
+                                    // Calculate delta on first tfdt
+                                    if tfdt_delta.is_none() {
+                                        tfdt_delta = Some(target_time as i64 - current_tfdt as i64);
+                                    }
+
+                                    // Apply delta
+                                    let new_tfdt =
+                                        (current_tfdt as i64 + tfdt_delta.unwrap()) as u64;
+
+                                    if version == 1 {
+                                        media_data[traf_pos + 12..traf_pos + 20]
+                                            .copy_from_slice(&new_tfdt.to_be_bytes());
+                                    } else {
+                                        media_data[traf_pos + 12..traf_pos + 16]
+                                            .copy_from_slice(&(new_tfdt as u32).to_be_bytes());
+                                    }
+
+                                    tracing::debug!(
+                                        "[tfdt] Patched baseMediaDecodeTime={} (orig={}, target={}, delta={})",
+                                        new_tfdt, current_tfdt, target_time, tfdt_delta.unwrap()
+                                    );
+                                }
+                            }
+                            traf_pos += sub_size;
+                        }
+                    }
+                    moof_pos += child_size;
+                }
+            }
+            pos += size;
+        }
+    } else {
+        tracing::warn!(
+            "[tfdt] No packets written for segment {} ({}), tfdt will be 0",
+            segment.sequence,
+            segment_type
+        );
+    }
+
+    // Prepend 'styp' box (Required for HLS fMP4)
+    // Structure: Size (4), Type (4), Major Brand (4), Minor Version (4), Compatible Brands (4...)
+    // Uses "iso8" as major brand, "cmfc" (CMAF) and "iso8" as compatible.
+    let styp_box = vec![
+        0x00, 0x00, 0x00, 24, // Size (24 bytes)
+        b's', b't', b'y', b'p', // Type: styp
+        b'i', b's', b'o', b'8', // Major Brand: iso8
+        0x00, 0x00, 0x02, 0x00, // Minor Version: 512
+        b'i', b's', b'o', b'8', // Compatible: iso8
+        b'c', b'm', b'f', b'c', // Compatible: cmfc
+    ];
+
+    // Efficiently prepend
+    media_data.splice(0..0, styp_box);
+
+    Ok(Bytes::from(media_data))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::StreamIndex;
+
+    #[test]
+    fn test_generate_video_segment_integration() {
+        // Initialize FFmpeg
+        let _ = ffmpeg::init();
+
+        let mut path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        path.push("testvideos");
+        path.push("bun33s.mp4");
+
+        if !path.exists() {
+            eprintln!("Test video not found at {:?}, skipping test", path);
+            return;
+        }
+
+        // Mock StreamIndex
+        let mut index = StreamIndex::new(path.clone());
+
+        // Mock a segment (first 4 seconds)
+        let segment = crate::state::SegmentInfo {
+            sequence: 0,
+            start_pts: 0,
+            end_pts: 360000, // 4 seconds * 90000
+            duration_secs: 4.0,
+            is_keyframe: true,
+            video_byte_offset: 0,
+        };
+        index.segments.push(segment);
+
+        // Call generate_video_segment
+        // Note: The third argument source_path in generate_video_segment is seemingly unused in the function body
+        // (it uses index.source_path), but we pass it anyway.
+        let result = generate_video_segment(&index, 0, 0, &path);
+
+        match result {
+            Ok(bytes) => {
+                assert!(!bytes.is_empty(), "Generated segment should not be empty");
+                println!("Generated video segment size: {}", bytes.len());
+
+                // Check for 'styp', 'moof', 'mdat'
+                assert!(bytes.windows(4).any(|w| w == b"styp"));
+                assert!(bytes.windows(4).any(|w| w == b"moof"));
+                assert!(bytes.windows(4).any(|w| w == b"mdat"));
+            }
+            Err(e) => panic!("Failed to generate video segment: {:?}", e),
+        }
+    }
+
+    #[test]
+    fn test_generate_video_segment_advancement() {
+        let _ = ffmpeg::init();
+        let mut path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        path.push("testvideos");
+        path.push("bun33s.mp4");
+        if !path.exists() {
+            return;
+        }
+
+        let mut index = StreamIndex::new(path.clone());
+        // Sequence 1 starts at 4.0s (360000 pts)
+        let segment = crate::state::SegmentInfo {
+            sequence: 1,
+            start_pts: 360000,
+            end_pts: 720000,
+            duration_secs: 4.0,
+            is_keyframe: true,
+            video_byte_offset: 0,
+        };
+        index.segments.push(segment.clone());
+        index.segments.push(segment.clone()); // Simplest way to have sequence 1 at index 1
+
+        let result = generate_video_segment(&index, 0, 1, &path);
+
+        match result {
+            Ok(bytes) => {
+                assert!(!bytes.is_empty());
+                // We patched it, so let's check if we see the log or if we can parse it here
+                // We'll rely on the eprintln! for manual verification in --nocapture
+            }
+            Err(e) => panic!("Failed to generate video segment: {:?}", e),
+        }
+    }
+
+    #[test]
+    fn test_generate_video_init_segment_trex() {
+        use crate::state::VideoStreamInfo;
+
+        // Initialize FFmpeg
+        let _ = ffmpeg::init();
+
+        let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
+        // Use the generated test video
+        let source_path = std::path::PathBuf::from(manifest_dir)
+            .join("tests")
+            .join("assets")
+            .join("video.mp4");
+
+        if !source_path.exists() {
+            eprintln!("Test video not found at {:?}, skipping test", source_path);
+            return;
+        }
+
+        // Mock StreamIndex with 25fps (duration should be 3600)
+        let index = StreamIndex {
+            stream_id: "test_stream".to_string(),
+            source_path: source_path.clone(),
+            duration_secs: 5.0,
+            video_timebase: ffmpeg_next::Rational(1, 12800),
+            video_streams: vec![VideoStreamInfo {
+                stream_index: 0,
+                width: 640,
+                height: 360,
+                framerate: ffmpeg_next::Rational(25, 1),
+                codec_id: ffmpeg_next::codec::Id::H264,
+                bitrate: 500000,
+                language: None,
+                profile: None,
+                level: None,
+            }],
+            audio_streams: vec![],
+            subtitle_streams: vec![],
+            segments: vec![],
+            indexed_at: std::time::SystemTime::now(),
+            last_accessed: std::sync::atomic::AtomicU64::new(0),
+        };
+
+        let init_segment =
+            generate_video_init_segment(&index).expect("Failed to generate init segment");
+
+        // Parse trex
+        let mut pos = 0;
+        let mut found_trex = false;
+        while pos + 8 <= init_segment.len() {
+            let size = u32::from_be_bytes(init_segment[pos..pos + 4].try_into().unwrap()) as usize;
+            let type_bytes = &init_segment[pos + 4..pos + 8];
+
+            if type_bytes == b"moov" {
+                let mut p2 = pos + 8;
+                let end2 = pos + size;
+                while p2 + 8 <= end2 {
+                    let s2 =
+                        u32::from_be_bytes(init_segment[p2..p2 + 4].try_into().unwrap()) as usize;
+                    let t2 = &init_segment[p2 + 4..p2 + 8];
+                    if t2 == b"mvex" {
+                        let mut p3 = p2 + 8;
+                        let end3 = p2 + s2;
+                        while p3 + 8 <= end3 {
+                            let s3 =
+                                u32::from_be_bytes(init_segment[p3..p3 + 4].try_into().unwrap())
+                                    as usize;
+                            let t3 = &init_segment[p3 + 4..p3 + 8];
+                            if t3 == b"trex" {
+                                let dur = u32::from_be_bytes(
+                                    init_segment[p3 + 20..p3 + 24].try_into().unwrap(),
+                                );
+                                println!("Found trex default sample duration: {}", dur);
+                                assert_eq!(dur, 3600, "Expected default sample duration 3600 for 25fps video (got {})", dur);
+                                found_trex = true;
+                            }
+                            p3 += s3;
+                        }
+                    }
+                    p2 += s2;
+                }
+            }
+            pos += size;
+        }
+        assert!(found_trex, "trex box not found in init segment");
+    }
+
+    #[test]
+    fn test_generate_audio_segment_integration() {
+        // Initialize FFmpeg
+        let _ = ffmpeg::init();
+
+        let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
+        let source_path = std::path::PathBuf::from(manifest_dir)
+            .join("testvideos")
+            .join("bun33s.mp4");
+
+        if !source_path.exists() {
+            eprintln!("Test video not found at {:?}, skipping test", source_path);
+            return;
+        }
+
+        // Mock StreamIndex
+        let mut index = StreamIndex::new(source_path.clone());
+
+        // Add an audio stream info
+        index.audio_streams.push(crate::state::AudioStreamInfo {
+            stream_index: 1, // In bun33s.mp4, index 1 is audio
+            codec_id: ffmpeg_next::codec::Id::AAC,
+            sample_rate: 48000,
+            channels: 2,
+            bitrate: 128000,
+            language: Some("en".to_string()),
+            is_transcoded: false,
+            source_stream_index: None,
+        });
+
+        // Mock a segment (first 4 seconds)
+        let segment = crate::state::SegmentInfo {
+            sequence: 0,
+            start_pts: 0,
+            end_pts: 360000, // 4 seconds * 90000
+            duration_secs: 4.0,
+            is_keyframe: true,
+            video_byte_offset: 0,
+        };
+        index.segments.push(segment);
+
+        // Call generate_audio_segment
+        let result = generate_audio_segment(&index, 1, 0, &source_path, false);
+
+        match result {
+            Ok(bytes) => {
+                println!("Generated audio segment: {} bytes", bytes.len());
+                assert!(bytes.len() > 100);
+
+                // Check for 'styp' and 'moof'
+                assert!(bytes.windows(4).any(|w| w == b"styp"));
+                assert!(bytes.windows(4).any(|w| w == b"moof"));
+                assert!(bytes.windows(4).any(|w| w == b"mdat"));
+            }
+            Err(e) => panic!("Failed to generate audio segment: {:?}", e),
+        }
+    }
+
+    #[test]
+    fn test_generate_audio_init_timescale() {
+        // Initialize FFmpeg
+        let _ = ffmpeg::init();
+
+        let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
+        let source_path = std::path::PathBuf::from(manifest_dir)
+            .join("testvideos")
+            .join("bun33s.mp4");
+
+        if !source_path.exists() {
+            eprintln!("Test video not found at {:?}, skipping test", source_path);
+            return;
+        }
+
+        // Mock StreamIndex
+        let mut index = StreamIndex::new(source_path.clone());
+
+        // Add an audio stream info with specific sample rate
+        index.audio_streams.push(crate::state::AudioStreamInfo {
+            stream_index: 1,
+            codec_id: ffmpeg_next::codec::Id::AAC,
+            sample_rate: 44100, // Match bun33s.mp4
+            channels: 2,
+            bitrate: 128000,
+            language: Some("en".to_string()),
+            is_transcoded: false,
+            source_stream_index: None,
+        });
+
+        let init_segment = generate_audio_init_segment(&index, 1, false)
+            .expect("Failed to generate audio init segment");
+
+        // Find 'mdhd' box for the audio track and check timescale
+        // mdhd version 0:
+        // Size(4), Type(4), Version(1), Flags(3), Creation(4), Mod(4), Timescale(4), Duration(4)...
+        // Total offset to Timescale: 4+4+1+3+4+4 = 20
+
+        let mut pos = 0;
+        let mut found_mdhd = false;
+        while pos + 8 <= init_segment.len() {
+            let size = u32::from_be_bytes(init_segment[pos..pos + 4].try_into().unwrap()) as usize;
+            let type_bytes = &init_segment[pos + 4..pos + 8];
+
+            if type_bytes == b"moov" || type_bytes == b"trak" || type_bytes == b"mdia" {
+                // Recurse into container boxes manually for simplicity in this test
+                pos += 8;
+                continue;
+            }
+
+            if type_bytes == b"mdhd" {
+                let timescale =
+                    u32::from_be_bytes(init_segment[pos + 20..pos + 24].try_into().unwrap());
+                println!("Found audio mdhd timescale: {}", timescale);
+                assert_eq!(timescale, 44100);
+                found_mdhd = true;
+                break;
+            }
+
+            if size < 8 {
+                break;
+            }
+            pos += size;
+        }
+        assert!(found_mdhd, "mdhd box not found in audio init segment");
+    }
+}

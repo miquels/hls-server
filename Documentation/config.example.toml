@@ -1,0 +1,48 @@
+# HLS Streaming Server Configuration
+# Copy this file to config.toml and customize as needed
+
+[server]
+# Host address to bind to
+host = "0.0.0.0"
+# Port to listen on
+port = 3000
+# Enable CORS for web player access
+cors_enabled = true
+
+[cache]
+# Maximum memory usage for segment cache in MB
+max_memory_mb = 512
+# Maximum number of cached segments
+max_segments = 100
+# TTL for cached segments in seconds (5 minutes)
+ttl_secs = 300
+
+[segment]
+# Target segment duration in seconds (HLS recommendation: 4-6 seconds)
+target_duration_secs = 4.0
+# Minimum segment duration tolerance
+min_duration_secs = 3.0
+# Maximum segment duration tolerance
+max_duration_secs = 6.0
+
+[audio]
+# Target sample rate for AAC output (HLS standard: 48kHz)
+target_sample_rate = 48000
+# AAC bitrate in bps
+aac_bitrate = 128000
+# Enable audio transcoding for non-AAC sources
+enable_transcoding = true
+
+[logging]
+# Log level: trace, debug, info, warn, error
+level = "info"
+# Output format: json, pretty
+format = "pretty"
+
+[limits]
+# Maximum concurrent streams
+max_concurrent_streams = 100
+# Rate limit: requests per second per IP
+rate_limit_rps = 100
+# Maximum request body size in MB
+max_request_size_mb = 10
