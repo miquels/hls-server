@@ -467,7 +467,6 @@ pub fn generate_subtitle_segment(
     end_sequence: usize,
     _source_path: &Path,
 ) -> Result<Bytes> {
-    use crate::ffmpeg::index::seek_to_byte_offset;
     use crate::subtitle::decoder::is_bitmap_subtitle_codec;
     use crate::subtitle::extractor::SubtitleExtractor;
     use crate::subtitle::webvtt::{WebVttConfig, WebVttWriter};
@@ -561,15 +560,29 @@ pub fn generate_subtitle_segment(
         return Ok(writer.write(&[]));
     }
 
-    // Open the file once, then seek to each sample individually
+    // Open the file and seek once to the start of the subtitle window.
+    // AVSEEK_FLAG_BYTE is not used: avformat_find_stream_info reads ~13MB on open,
+    // after which backward byte-seeks are ignored by the MP4 demuxer.
+    // Instead we do a single timestamp seek and iterate only subtitle packets,
+    // stopping as soon as we pass abs_end.  The sample_index tells us the exact
+    // PTS range so we never scan the whole file.
     let mut input = ffmpeg::format::input(&index.source_path)
         .map_err(|e| HlsError::Ffmpeg(crate::error::FfmpegError::OpenInput(e.to_string())))?;
+
+    // Seek to just before the first matching sample using AV_TIME_BASE (µs).
+    let first_sample_pts = matching.first().map(|s| s.pts).unwrap_or(abs_start);
+    // Convert from subtitle stream timebase to AV_TIME_BASE (µs)
+    let seek_us = crate::ffmpeg::utils::rescale_ts(
+        first_sample_pts,
+        stream_timebase,
+        ffmpeg::Rational::new(1, 1_000_000),
+    );
+    let _ = input.seek(seek_us, ..seek_us); // non-fatal; worst case we read a few extra packets
 
     let extractor = SubtitleExtractor::new(sub_info.codec_id, stream_timebase);
     let mut cues = Vec::new();
 
     // video_st_in_sub_tb: used to align subtitle PTS to the video timeline
-    // (same logic as the old implementation)
     let video_st = {
         let st = index
             .video_streams
@@ -582,36 +595,40 @@ pub fn generate_subtitle_segment(
     let video_st_in_sub_tb =
         crate::ffmpeg::utils::rescale_ts(video_st, video_tb, stream_timebase);
 
-    for sample in &matching {
-        // Seek directly to this sample's byte offset — one seek per cue
-        if let Err(e) = seek_to_byte_offset(&mut input, track_index as i32, sample.byte_offset) {
-            tracing::debug!("subtitle byte-seek failed (offset={}): {}", sample.byte_offset, e);
+    // Build a set of the expected PTS values so we can stop early once all are seen.
+    let mut remaining: std::collections::HashSet<i64> =
+        matching.iter().map(|s| s.pts).collect();
+
+    for (stream, mut packet) in input.packets() {
+        if stream.index() != track_index {
+            continue;
+        }
+        let pts = packet.pts().unwrap_or(0);
+        if pts >= abs_end {
+            break;
+        }
+        if pts < abs_start {
             continue;
         }
 
-        // Read the next packet; it should be the subtitle sample we seeked to
-        for (stream, mut packet) in input.packets() {
-            if stream.index() != track_index {
-                // Skip non-subtitle packets that may appear after the seek
-                continue;
-            }
+        remaining.remove(&pts);
 
-            let pts = packet.pts().unwrap_or(sample.pts);
-            let sub_playtime = pts.saturating_sub(sub_start_time);
-            let aligned_pts = sub_playtime + video_st_in_sub_tb;
-            packet.set_pts(Some(aligned_pts));
+        let sub_playtime = pts.saturating_sub(sub_start_time);
+        let aligned_pts = sub_playtime + video_st_in_sub_tb;
+        packet.set_pts(Some(aligned_pts));
 
-            match extractor.extract_cues(&packet) {
-                Ok(c) => cues.extend(c),
-                Err(e) => tracing::debug!(
-                    track_index,
-                    start_sequence,
-                    end_sequence,
-                    "subtitle cue extraction error (skipping): {}",
-                    e
-                ),
-            }
-            // Only read one subtitle packet per seek
+        match extractor.extract_cues(&packet) {
+            Ok(c) => cues.extend(c),
+            Err(e) => tracing::debug!(
+                track_index,
+                start_sequence,
+                end_sequence,
+                "subtitle cue extraction error (skipping): {}",
+                e
+            ),
+        }
+
+        if remaining.is_empty() {
             break;
         }
     }
@@ -696,26 +713,19 @@ fn generate_media_segment_ffmpeg(
     // Use the video timebase stored at index time — no need to re-read it from the file.
     let video_timebase = index.video_timebase;
 
-    // Seek to the segment start.
-    // For video segments we have the exact byte offset of the keyframe from the
-    // demuxer index, so we use a byte-seek which lands directly on the keyframe
-    // without any demuxer-internal forward scan.
-    // For audio segments (which share the same interleaved file) we fall back to
-    // a timestamp-based seek since audio samples don't have a stored byte offset.
-    if segment_type == "video" && segment.video_byte_offset > 0 {
-        crate::ffmpeg::index::seek_to_byte_offset(&mut input, stream_idx as i32, segment.video_byte_offset)
-            .map_err(|e| HlsError::Ffmpeg(crate::error::FfmpegError::ReadFrame(e)))?;
+    // Seek to segment start using timestamp-based seek (AV_TIME_BASE / microseconds).
+    // AVSEEK_FLAG_BYTE is not used here: avformat_find_stream_info already consumed
+    // ~13MB of the file, so backward byte-seeks are silently ignored by the MP4
+    // demuxer, resulting in 0 packets read.  Timestamp seek works correctly.
+    let seek_ts = if video_timebase.denominator() != 0 {
+        segment.start_pts * 1_000_000 * video_timebase.numerator() as i64
+            / video_timebase.denominator() as i64
     } else {
-        let seek_ts = if video_timebase.denominator() != 0 {
-            segment.start_pts * 1_000_000 * video_timebase.numerator() as i64
-                / video_timebase.denominator() as i64
-        } else {
-            segment.start_pts * 1_000_000 / 90_000
-        };
-        input
-            .seek(seek_ts, ..seek_ts)
-            .map_err(|e| HlsError::Ffmpeg(crate::error::FfmpegError::ReadFrame(e.to_string())))?;
-    }
+        segment.start_pts * 1_000_000 / 90_000
+    };
+    input
+        .seek(seek_ts, ..seek_ts)
+        .map_err(|e| HlsError::Ffmpeg(crate::error::FfmpegError::ReadFrame(e.to_string())))?;
 
     // Iterate packets
     let mut _packet_count = 0;
