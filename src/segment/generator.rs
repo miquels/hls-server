@@ -855,7 +855,7 @@ fn generate_media_segment_ffmpeg(
     // first tfdt value we encounter. We then apply this delta to ALL tfdt boxes in the file.
     // This handles cases where FFmpeg produces multiple fragments (moof) per segment;
     // resetting all of them to `target_time` would cause timestamp resets (Decreasing DTS).
-    if let Some(_base_dts) = first_packet_dts {
+    if let Some(base_dts) = first_packet_dts {
         // Determine the target timebase for tfdt.
         // For video, it's usually 90kHz (HLS standard).
         // For audio, it's the sample rate (e.g. 48000, 44100).
@@ -877,13 +877,31 @@ fn generate_media_segment_ffmpeg(
             output_timebase.denominator()
         );
 
-        // Calculate target time in the OUTPUT timebase
-        let target_time = crate::ffmpeg::utils::rescale_ts(
-            segment.start_pts,
-            video_timebase, // source is always video timebase (from scanner)
-            output_timebase,
-        )
-        .max(0) as u64;
+        // Calculate target time in the OUTPUT timebase.
+        //
+        // VIDEO: anchor to segment.start_pts (rescaled from video timebase).
+        //   Using first_packet_dts for video causes problems with B-frames: the
+        //   first DTS in a segment is earlier than the PTS boundary by (B_depth ×
+        //   frame_dur), which can wrap to ~2^64 at segment 0 or produce non-monotonic
+        //   tfdt values.
+        //
+        // AUDIO: anchor to first_packet_dts directly.
+        //   Audio streams often have a negative start_time (encoder delay, typically
+        //   -1024 to -2048 samples at 48kHz ≈ 21–43 ms).  Rescaling segment.start_pts
+        //   from video timebase ignores this offset, making audio play ~28ms early.
+        //   first_packet_dts is the actual first sample's timestamp in the audio
+        //   stream's timebase — exactly what tfdt.baseMediaDecodeTime should be.
+        let target_time = if segment_type == "video" {
+            crate::ffmpeg::utils::rescale_ts(
+                segment.start_pts,
+                video_timebase,
+                output_timebase,
+            )
+            .max(0) as u64
+        } else {
+            // Audio: use the actual first packet DTS, clamped to 0
+            base_dts.max(0) as u64
+        };
 
         // mfhd.FragmentSequenceNumber must be monotonically increasing.
         // We start with the segment sequence (shifted to avoid collision if possible,
