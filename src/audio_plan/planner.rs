@@ -319,6 +319,7 @@ mod tests {
             language: language.map(|s| s.to_string()),
             is_transcoded: false,
             source_stream_index: None,
+            encoder_delay: 0,
         }
     }
 

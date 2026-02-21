@@ -234,6 +234,68 @@ impl Fmp4Muxer {
     }
 }
 
+/// Parse the first `elst` (edit list) `media_time` from fMP4 init segment bytes.
+///
+/// FFmpeg writes an `edts/elst` box when the stream has an encoder delay
+/// (e.g. AAC: media_time=1024 at 48kHz = 21.3ms).  The player subtracts this
+/// value from every `tfdt` to compute the presentation timestamp:
+///   presentation = (tfdt - elst_media_time) / timescale
+///
+/// Returns `Some(media_time)` if an elst entry is found, `None` otherwise.
+pub fn parse_elst_media_time(data: &[u8]) -> Option<i64> {
+    parse_elst_in_boxes(data)
+}
+
+fn parse_elst_in_boxes(data: &[u8]) -> Option<i64> {
+    let mut pos = 0;
+    while pos + 8 <= data.len() {
+        let size = u32::from_be_bytes(data[pos..pos + 4].try_into().ok()?) as usize;
+        let box_type = &data[pos + 4..pos + 8];
+        let size = if size == 0 { data.len() - pos } else { size };
+        if size < 8 || pos + size > data.len() {
+            break;
+        }
+        let content = &data[pos + 8..pos + size];
+        match box_type {
+            b"moov" | b"trak" | b"edts" | b"mdia" | b"minf" | b"stbl" => {
+                if let Some(v) = parse_elst_in_boxes(content) {
+                    return Some(v);
+                }
+            }
+            b"elst" => {
+                // version(1) + flags(3) + entry_count(4) = 8 bytes header
+                if content.len() < 8 {
+                    break;
+                }
+                let version = content[0];
+                let entry_count = u32::from_be_bytes(content[4..8].try_into().ok()?) as usize;
+                if entry_count == 0 {
+                    break;
+                }
+                // First entry: segment_duration + media_time + media_rate
+                let off = 8;
+                let media_time = if version == 1 {
+                    // 8-byte segment_duration, then 8-byte signed media_time
+                    if content.len() < off + 16 {
+                        break;
+                    }
+                    i64::from_be_bytes(content[off + 8..off + 16].try_into().ok()?)
+                } else {
+                    // 4-byte segment_duration, then 4-byte signed media_time
+                    if content.len() < off + 8 {
+                        break;
+                    }
+                    i32::from_be_bytes(content[off + 4..off + 8].try_into().ok()?) as i64
+                };
+                return Some(media_time);
+            }
+            _ => {}
+        }
+        pos += size;
+    }
+    None
+}
+
 impl Drop for Fmp4Muxer {
     fn drop(&mut self) {
         unsafe {

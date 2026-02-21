@@ -44,6 +44,12 @@ pub struct AudioStreamInfo {
     pub language: Option<String>,
     pub is_transcoded: bool,
     pub source_stream_index: Option<usize>,
+    /// Encoder delay in stream-native timebase samples (e.g. 1024 @ 48kHz for AAC).
+    /// FFmpeg signals this as a negative first-packet DTS.  The init segment's
+    /// edit list tells the player to subtract this from every tfdt:
+    ///   presentation = (tfdt - encoder_delay) / timescale
+    /// Populated at scan time; 0 if unknown or not applicable.
+    pub encoder_delay: i64,
 }
 
 /// A reference to a single subtitle sample in the source file.

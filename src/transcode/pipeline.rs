@@ -370,6 +370,7 @@ mod tests {
             language: Some("en".to_string()),
             is_transcoded: false,
             source_stream_index: None,
+            encoder_delay: 0,
         }
     }
 
@@ -405,6 +406,7 @@ mod tests {
             language: Some("en".to_string()),
             is_transcoded: false,
             source_stream_index: None,
+            encoder_delay: 0,
         };
         let reqs = get_transcode_requirements(&stream);
         assert!(reqs.needs_transcoding);

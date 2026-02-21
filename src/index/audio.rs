@@ -26,6 +26,7 @@ pub fn analyze_audio_stream(stream: &ffmpeg::Stream, index: usize) -> Result<Aud
         language: get_stream_language(stream),
         is_transcoded: false,
         source_stream_index: None,
+            encoder_delay: 0,
     })
 }
 

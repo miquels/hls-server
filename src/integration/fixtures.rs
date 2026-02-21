@@ -151,6 +151,7 @@ impl TestMediaInfo {
                 language,
                 is_transcoded: false,
                 source_stream_index: None,
+            encoder_delay: 0,
             });
             audio_index += 1;
         }

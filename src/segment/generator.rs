@@ -705,10 +705,37 @@ fn generate_media_segment_ffmpeg(
     let stream_idx = stream_index
         .ok_or_else(|| HlsError::StreamNotFound(format!("No {} stream found", segment_type)))?;
 
-    // Write header
-    // Fmp4Muxer now retains the header in the buffer to allow correct seeking/updating
-    // during packet writing and finalization. We must strip it later.
-    let _init_segment = muxer.write_header(true)?;
+    // Write header (delay_moov=true so the moof/mdat fragments are the only output).
+    let _init_bytes = muxer.write_header(true)?;
+
+    // Encoder delay: the number of samples (in output timebase) that the codec
+    // prepends as pre-roll before the first presented sample.  FFmpeg signals this
+    // by giving the first packet a *negative* DTS (e.g. -1024 @ 48 kHz for AAC).
+    // The init segment's edit list (edts/elst) tells the player to subtract this
+    // value from every tfdt to get the presentation time:
+    //   presentation = (tfdt - encoder_delay) / timescale
+    // so we must set: tfdt = video_presentation * timescale + encoder_delay
+    //
+    // We read this from StreamIndex where it was captured at scan time by reading
+    // the first packet of the stream — the universal FFmpeg approach that works
+    // for any container (MP4, MKV, etc.) and any codec (AAC, Opus, Vorbis, etc.).
+    let encoder_delay: i64 = if segment_type == "audio" {
+        if let Some(target) = target_track_index {
+            index.audio_streams
+                .iter()
+                .find(|a| a.stream_index == target)
+                .map(|a| a.encoder_delay)
+                .unwrap_or(0)
+        } else {
+            index.audio_streams.first().map(|a| a.encoder_delay).unwrap_or(0)
+        }
+    } else {
+        0
+    };
+    tracing::debug!(
+        "[sync] {} seg={} encoder_delay={}",
+        segment_type, segment.sequence, encoder_delay
+    );
 
     // Use the video timebase stored at index time — no need to re-read it from the file.
     let video_timebase = index.video_timebase;
@@ -723,6 +750,12 @@ fn generate_media_segment_ffmpeg(
     } else {
         segment.start_pts * 1_000_000 / 90_000
     };
+    tracing::debug!(
+        "[sync] {} seg={} start_pts={} video_tb={}/{} seek_ts_us={}",
+        segment_type, segment.sequence, segment.start_pts,
+        video_timebase.numerator(), video_timebase.denominator(), seek_ts
+    );
+
     input
         .seek(seek_ts, ..seek_ts)
         .map_err(|e| HlsError::Ffmpeg(crate::error::FfmpegError::ReadFrame(e.to_string())))?;
@@ -790,6 +823,14 @@ fn generate_media_segment_ffmpeg(
                     // Capture the first-packet DTS (must be the same value FFmpeg
                     // will use as the fragment base in its trun table).
                     if first_packet_dts.is_none() {
+                        tracing::debug!(
+                            "[sync] {} seg={} first_pkt: in_pts={} out_pts={} in_dts={:?} out_dts={} in_tb={}/{} out_tb={}/{}",
+                            segment_type, segment.sequence,
+                            pts, out_pts,
+                            packet.dts(), out_dts,
+                            stream.time_base().numerator(), stream.time_base().denominator(),
+                            out_tb.numerator(), out_tb.denominator()
+                        );
                         first_packet_dts = Some(out_dts);
                     }
                 } else if first_packet_dts.is_none() {
@@ -879,29 +920,41 @@ fn generate_media_segment_ffmpeg(
 
         // Calculate target time in the OUTPUT timebase.
         //
-        // VIDEO: anchor to segment.start_pts (rescaled from video timebase).
-        //   Using first_packet_dts for video causes problems with B-frames: the
-        //   first DTS in a segment is earlier than the PTS boundary by (B_depth ×
-        //   frame_dur), which can wrap to ~2^64 at segment 0 or produce non-monotonic
-        //   tfdt values.
+        // The player computes presentation time as:
+        //   presentation = (tfdt - elst_media_time) / timescale
         //
-        // AUDIO: anchor to first_packet_dts directly.
-        //   Audio streams often have a negative start_time (encoder delay, typically
-        //   -1024 to -2048 samples at 48kHz ≈ 21–43 ms).  Rescaling segment.start_pts
-        //   from video timebase ignores this offset, making audio play ~28ms early.
-        //   first_packet_dts is the actual first sample's timestamp in the audio
-        //   stream's timebase — exactly what tfdt.baseMediaDecodeTime should be.
-        let target_time = if segment_type == "video" {
-            crate::ffmpeg::utils::rescale_ts(
-                segment.start_pts,
-                video_timebase,
-                output_timebase,
-            )
-            .max(0) as u64
-        } else {
-            // Audio: use the actual first packet DTS, clamped to 0
-            base_dts.max(0) as u64
-        };
+        // where elst_media_time is the stream's start_time (encoder delay), written
+        // by FFmpeg into the init segment's edit list box (edts/elst).
+        //
+        // Therefore the correct tfdt is:
+        //   tfdt = video_presentation_sec * output_timescale + stream_start_time
+        //
+        // For VIDEO: stream_start_time is 0 (no elst written), so this reduces to
+        //   rescaling segment.start_pts from video timebase.
+        //   We use segment.start_pts (not first_packet_dts) to avoid B-frame DTS
+        //   issues: the first DTS in a segment is earlier than the PTS boundary by
+        //   (B_depth × frame_dur), which wraps to ~2^64 at segment 0.
+        //
+        // For AUDIO: stream_start_time = elst media_time (e.g. 1024 @ 48kHz = 21.3ms).
+        //   Without this correction audio plays ~13-21ms early because the player
+        //   subtracts the elst offset from every tfdt.
+        let video_presentation_in_output_tb = crate::ffmpeg::utils::rescale_ts(
+            segment.start_pts,
+            video_timebase,
+            output_timebase,
+        );
+        // encoder_delay is in the stream's native timebase (= output_timebase for audio).
+        // For AAC at 48kHz: encoder_delay=1024 (21.3ms). For video: 0.
+        let target_time = (video_presentation_in_output_tb + encoder_delay).max(0) as u64;
+
+        tracing::debug!(
+            "[sync] {} seg={} tfdt target_time={} out_tb={}/{} (base_dts={} start_pts_rescaled={} encoder_delay={})",
+            segment_type, segment.sequence, target_time,
+            output_timebase.numerator(), output_timebase.denominator(),
+            base_dts,
+            crate::ffmpeg::utils::rescale_ts(segment.start_pts, video_timebase, output_timebase),
+            encoder_delay
+        );
 
         // mfhd.FragmentSequenceNumber must be monotonically increasing.
         // We start with the segment sequence (shifted to avoid collision if possible,
@@ -1239,6 +1292,7 @@ mod tests {
             language: Some("en".to_string()),
             is_transcoded: false,
             source_stream_index: None,
+            encoder_delay: 0,
         });
 
         // Mock a segment (first 4 seconds)
@@ -1297,6 +1351,7 @@ mod tests {
             language: Some("en".to_string()),
             is_transcoded: false,
             source_stream_index: None,
+            encoder_delay: 0,
         });
 
         let init_segment = generate_audio_init_segment(&index, 1, false)

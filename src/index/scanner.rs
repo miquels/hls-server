@@ -59,7 +59,7 @@ pub fn scan_file_with_options<P: AsRef<Path>>(
 
     // Opening the file parses moov/cues and populates the demuxer index.
     // No media data is read at this point.
-    let context = ffmpeg::format::input(&path)
+    let mut context = ffmpeg::format::input(&path)
         .map_err(|e| FfmpegError::OpenInput(format!("Failed to open {:?}: {}", path, e)))?;
 
     let mut index = StreamIndex::new(path.clone());
@@ -122,14 +122,67 @@ pub fn scan_file_with_options<P: AsRef<Path>>(
     }
     index.video_timebase = video_tb;
 
+    tracing::debug!(
+        "Video stream {}: timebase={}/{}, start_time={}, start_time_sec={:.6}",
+        video_stream_idx,
+        video_tb.numerator(), video_tb.denominator(),
+        video_start_time,
+        video_start_time as f64 * video_tb.numerator() as f64 / video_tb.denominator() as f64
+    );
+
     // Read the video stream's index entries (keyframe positions from moov/cues)
     let video_entries = read_index_entries(&video_stream);
+    // Drop video_stream borrow so we can call context.packets() mutably below
+    drop(video_stream);
     if video_entries.is_empty() {
         return Err(HlsError::NoIndex(format!(
             "File {:?} has no demuxer index for the video stream. \
              Only files with a complete container index (MP4 moov, MKV Cues) are supported.",
             path
         )));
+    }
+
+    if let Some(first) = video_entries.first() {
+        tracing::debug!(
+            "First video index entry: pts={}, pos={}, is_keyframe={}",
+            first.timestamp, first.pos, first.is_keyframe()
+        );
+    }
+
+    // Determine encoder_delay for each audio stream by reading its first packet.
+    // FFmpeg signals encoder delay as a negative first-packet DTS — universal
+    // across all containers (MP4, MKV, …) and codecs (AAC, Opus, Vorbis, …).
+    // The init segment's edit list tells the player:
+    //   presentation = (tfdt - encoder_delay) / timescale
+    // so we must set: tfdt = video_presentation * timescale + encoder_delay
+    {
+        use std::collections::HashMap;
+        let audio_indices: std::collections::HashSet<usize> = index.audio_streams
+            .iter()
+            .map(|a| a.stream_index)
+            .collect();
+        let mut delays: HashMap<usize, i64> = HashMap::new();
+
+        for (stream, packet) in context.packets() {
+            let idx = stream.index();
+            if !audio_indices.contains(&idx) || delays.contains_key(&idx) {
+                continue;
+            }
+            let dts = packet.dts().unwrap_or(0);
+            let delay = if dts < 0 { -dts } else { 0 };
+            delays.insert(idx, delay);
+            tracing::debug!(
+                "Audio stream {}: first_pkt_dts={}, encoder_delay={}",
+                idx, dts, delay
+            );
+            if delays.len() == audio_indices.len() {
+                break;
+            }
+        }
+
+        for audio in &mut index.audio_streams {
+            audio.encoder_delay = *delays.get(&audio.stream_index).unwrap_or(&0);
+        }
     }
 
     // Build segment boundaries from keyframe entries
@@ -140,6 +193,14 @@ pub fn scan_file_with_options<P: AsRef<Path>>(
         index.duration_secs,
         options.segment_duration_secs,
     );
+
+    if let Some(seg0) = segments.first() {
+        tracing::debug!(
+            "Segment 0: start_pts={}, end_pts={}, start_sec={:.6}",
+            seg0.start_pts, seg0.end_pts,
+            seg0.start_pts as f64 * video_tb.numerator() as f64 / video_tb.denominator() as f64
+        );
+    }
 
     // Build subtitle sample_index and non_empty_sequences from subtitle index entries
     for sub in &mut index.subtitle_streams {

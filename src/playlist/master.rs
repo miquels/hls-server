@@ -310,6 +310,7 @@ mod tests {
             language: Some("en".to_string()),
             is_transcoded: false,
             source_stream_index: None,
+            encoder_delay: 0,
         });
 
         index
