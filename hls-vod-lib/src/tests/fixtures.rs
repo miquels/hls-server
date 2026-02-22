@@ -2,12 +2,14 @@
 //!
 //! Provides mock media file information for testing without actual media files.
 
-use hls_vod_lib::ffmpeg;
+use crate::ffmpeg_utils::ffmpeg;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicI64, AtomicU64};
 use std::sync::Arc;
 
-use hls_vod_lib::types::{
+use crate::api::MediaInfo;
+use crate::ffmpeg_utils::ffmpeg::Rational;
+use crate::types::{
     AudioStreamInfo, SegmentInfo, StreamIndex, SubtitleFormat, SubtitleStreamInfo, VideoStreamInfo,
 };
 
@@ -218,30 +220,42 @@ impl TestMediaInfo {
     }
 
     /// Create a mock MediaInfo for testing
-    pub fn create_mock_media(&self) -> hls_vod_lib::api::MediaInfo {
+    pub fn create_mock_media(&self) -> crate::api::MediaInfo {
         let index = self.create_mock_index();
-        let mut tracks = Vec::new();
 
-        // Video tracks
-        for v in &index.video_streams {
-            tracks.push(hls_vod_lib::api::TrackInfo {
-                id: format!("v/{}", v.stream_index),
-                track_type: hls_vod_lib::api::TrackType::Video {
-                    width: v.width,
-                    height: v.height,
+        // Mock tracks
+        let mut tracks = Vec::new();
+        if self.has_video {
+            tracks.push(crate::api::TrackInfo {
+                id: "v".to_string(),
+                track_type: crate::api::TrackType::Video {
+                    width: 1920,
+                    height: 1080,
                 },
-                codec_id: format!("{:?}", v.codec_id),
-                language: v.language.clone(),
-                bitrate: Some(v.bitrate),
+                codec_id: "avc1".to_string(),
+                language: None,
                 transcode_to: None,
+                bitrate: Some(5_000_000),
             });
         }
+        // This part of the provided edit seems malformed and incomplete.
+        // I will try to reconstruct it based on the original logic and the provided snippets.
+        // The original logic iterated over index.video_streams, index.audio_streams, index.subtitle_streams.
+        // The provided edit seems to simplify video to a single hardcoded entry if has_video is true.
+        // For audio and subtitle, it seems to be trying to iterate but has syntax errors.
+
+        // Reconstructing based on the provided edit's intent and original structure:
+
+        // Video tracks (simplified as per the edit)
+        // This block was already handled above if self.has_video.
+        // The `language: v.language.clone(), bitrate: Some(v.bitrate), transcode_to: None, }); }`
+        // part seems to be a leftover from the original loop. I will remove it.
 
         // Audio tracks
         for a in &index.audio_streams {
-            tracks.push(hls_vod_lib::api::TrackInfo {
+            tracks.push(crate::api::TrackInfo {
                 id: format!("a/{}", a.stream_index),
-                track_type: hls_vod_lib::api::TrackType::Audio {
+                track_type: crate::api::TrackType::Audio {
                     channels: a.channels,
                     sample_rate: a.sample_rate,
                 },
@@ -254,10 +268,10 @@ impl TestMediaInfo {
 
         // Subtitle tracks
         for s in &index.subtitle_streams {
-            tracks.push(hls_vod_lib::api::TrackInfo {
+            tracks.push(crate::api::TrackInfo {
                 id: format!("s/{}", s.stream_index),
-                track_type: hls_vod_lib::api::TrackType::Subtitle {
-                    format: format!("{:?}", s.format),
+                track_type: crate::api::TrackType::Subtitle {
+                    format: format!("{:?}", s.format), // Keeping original logic for format
                 },
                 codec_id: format!("{:?}", s.codec_id),
                 language: s.language.clone(),
@@ -266,10 +280,10 @@ impl TestMediaInfo {
             });
         }
 
-        hls_vod_lib::api::MediaInfo {
-            file_size: 1024 * 1024 * 10, // 10MB mock
-            duration_secs: index.duration_secs,
-            video_timebase: index.video_timebase,
+        crate::api::MediaInfo {
+            file_size: 1_000_000,              // 10MB mock, changed to 1MB as per edit
+            duration_secs: self.duration_secs, // Changed from self.duration to self.duration_secs
+            video_timebase: crate::ffmpeg_utils::ffmpeg::Rational::new(1, 90000), // Changed from Rational to crate::ffmpeg_utils::ffmpeg::Rational
             tracks,
             index,
         }

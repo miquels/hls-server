@@ -1,18 +1,14 @@
 //! End-to-end integration tests
 
-use std::sync::Arc;
-
-use crate::config::ServerConfig;
-use crate::integration::fixtures::TestMediaInfo;
-use crate::integration::validation::{
+use crate::api::{generate_main_playlist, generate_segment, generate_track_playlist};
+use crate::tests::fixtures::TestMediaInfo;
+use crate::tests::validation::{
     validate_master_playlist, validate_variant_playlist, validate_webvtt, PlaylistType,
     ValidationResult,
 };
-use crate::state::AppState;
-use hls_vod_lib::api::{generate_main_playlist, generate_segment, generate_track_playlist};
 
 /// Test the complete stream lifecycle
-pub async fn test_stream_lifecycle() -> ValidationResult {
+pub fn test_stream_lifecycle() -> ValidationResult {
     // Use a real asset for the complete lifecycle test
     let mut asset_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     asset_path.push("testvideos");
@@ -22,38 +18,27 @@ pub async fn test_stream_lifecycle() -> ValidationResult {
         return ValidationResult::success(); // Skip if asset missing
     }
 
-    let media = hls_vod_lib::api::parse_file(&asset_path, true).expect("Failed to scan test asset");
-
-    // Create app state and register stream
-    let state = Arc::new(AppState::new(ServerConfig::default()));
+    let media = crate::api::parse_file(&asset_path, true).expect("Failed to scan test asset");
     let stream_id = media.index.stream_id.clone();
-    state.register_stream(media);
-
-    // Verify stream is registered
-    if state.get_stream(&stream_id).is_none() {
-        return ValidationResult::fail("Failed to register stream");
-    }
-
-    let media_ref = state.get_stream(&stream_id).unwrap();
     let prefix = format!("/streams/{}", stream_id);
 
     // Generate and validate master playlist
-    let master = generate_main_playlist(&media_ref, &prefix).expect("Failed to generate master");
+    let master = generate_main_playlist(&media, &prefix).expect("Failed to generate master");
     let master_result = validate_master_playlist(&master);
     if !master_result.is_valid {
         return master_result;
     }
 
     // Generate and validate video playlist
-    let video = generate_track_playlist(&media_ref, "v/media.m3u8")
-        .expect("Failed to generate video playlist");
+    let video =
+        generate_track_playlist(&media, "v/media.m3u8").expect("Failed to generate video playlist");
     let video_result = validate_variant_playlist(&video, PlaylistType::Video);
     if !video_result.is_valid {
         return video_result;
     }
 
     // Generate init segment
-    let init_result = generate_segment(&media_ref, "v/init.mp4");
+    let init_result = generate_segment(&media, "v/init.mp4");
     if init_result.is_err() {
         return ValidationResult::fail(format!(
             "Failed to generate init segment: {}",
@@ -269,9 +254,9 @@ impl std::fmt::Display for BenchmarkResult {
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn test_stream_lifecycle_e2e() {
-        let result = test_stream_lifecycle().await;
+    #[test]
+    fn test_stream_lifecycle_e2e() {
+        let result = test_stream_lifecycle();
         assert!(
             result.is_valid,
             "Stream lifecycle test failed: {:?}",

@@ -1,8 +1,7 @@
 #[cfg(test)]
 mod tests {
-    use hls_vod_lib::ffmpeg;
-    use hls_vod_lib::segment::generator::generate_video_segment;
-    use hls_vod_lib::types::{SegmentInfo, StreamIndex};
+    use crate::ffmpeg_utils::ffmpeg;
+    use crate::types::{SegmentInfo, StreamIndex};
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicI64, AtomicU64};
     use std::sync::Arc;
@@ -24,7 +23,7 @@ mod tests {
             stream_id: "test-id".to_string(),
             source_path: path.clone(),
             duration_secs: 60.0,
-            video_timebase: ffmpeg::Rational::new(1, 90000),
+            video_timebase: crate::ffmpeg_utils::ffmpeg::Rational::new(1, 90000),
             video_streams: Vec::new(),
             audio_streams: Vec::new(),
             subtitle_streams: Vec::new(),
@@ -49,11 +48,11 @@ mod tests {
         let v: Vec<AtomicI64> = (0..n).map(|_| AtomicI64::new(i64::MIN)).collect();
         index.segment_first_pts = Arc::new(v);
 
-        let bytes = hls_vod_lib::segment::generate_video_segment(&index, 0, 1, &path).unwrap();
+        let bytes = crate::segment::generator::generate_video_segment(&index, 0, 1, &path).unwrap();
         let data = bytes.as_ref();
 
         // Parse moof and trun
-        use hls_vod_lib::segment::muxer::find_box;
+        use crate::segment::muxer::find_box;
         let moof_pos = find_box(data, b"moof").expect("moof not found");
         let moof_size = u32::from_be_bytes([
             data[moof_pos],

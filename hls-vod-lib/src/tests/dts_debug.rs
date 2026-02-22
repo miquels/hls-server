@@ -2,14 +2,12 @@
 
 #[cfg(test)]
 mod tests {
-    use hls_vod_lib::ffmpeg;
-    use hls_vod_lib::segment::generator::{
+    use crate::ffmpeg_utils::ffmpeg;
+    use crate::segment::generator::{
         generate_audio_segment, generate_video_init_segment, generate_video_segment,
     };
-    use hls_vod_lib::segment::muxer::find_box;
+    use crate::segment::muxer::find_box;
     use std::path::PathBuf;
-    use std::sync::atomic::{AtomicI64, AtomicU64};
-    use std::sync::Arc;
 
     // ── helpers ──────────────────────────────────────────────────────────────
 
@@ -211,8 +209,7 @@ mod tests {
             return;
         }
 
-        let media =
-            hls_vod_lib::api::parse_file(&asset_path, true).expect("Failed to scan test asset");
+        let media = crate::api::parse_file(&asset_path, true).expect("Failed to scan test asset");
         let index = &media.index;
 
         if index.segments.len() < 2 {
@@ -264,8 +261,7 @@ mod tests {
             return;
         }
 
-        let media =
-            hls_vod_lib::api::parse_file(&asset_path, true).expect("Failed to scan test asset");
+        let media = crate::api::parse_file(&asset_path, true).expect("Failed to scan test asset");
         let index = &media.index;
         let audio_stream = index.audio_streams.first().expect("No audio stream found");
 

@@ -10,7 +10,6 @@ mod config;
 mod config_file;
 mod error;
 mod http;
-mod integration;
 mod limits;
 mod metrics;
 mod state;
