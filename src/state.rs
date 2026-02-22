@@ -31,10 +31,6 @@ pub struct VideoStreamInfo {
     pub language: Option<String>,
     pub profile: Option<i32>,
     pub level: Option<i32>,
-    /// Encoder delay in stream-native timebase samples (e.g. 1335 @ 1/16000 for H.264).
-    /// FFmpeg signals this as a negative first-packet DTS after applying the edit list.
-    /// Used to compute the net audio/video presentation offset.
-    pub encoder_delay: i64,
 }
 
 /// Audio stream information
@@ -105,16 +101,11 @@ pub enum SubtitleFormat {
 #[derive(Debug, Clone)]
 pub struct SegmentInfo {
     pub sequence: usize,
-    pub start_pts: i64,   // DTS of keyframe, in video_timebase
-    pub end_pts: i64,     // DTS of next keyframe, in video_timebase
+    pub start_pts: i64,
+    pub end_pts: i64,
     pub duration_secs: f64,
     pub is_keyframe: bool,
     pub video_byte_offset: u64,
-    /// PTS of the first displayable video frame in this segment, in video_timebase.
-    /// For B-frame video this is start_pts + CT_offset (composition time).
-    /// Used as the tfdt anchor so audio and video align on the first visible frame.
-    /// Set to start_pts if not yet determined (e.g. at scan time before packet read).
-    pub first_video_pts: i64,
 }
 
 /// Stream index - metadata about a media file
@@ -132,11 +123,10 @@ pub struct StreamIndex {
     pub segments: Vec<SegmentInfo>,
     pub indexed_at: SystemTime,
     pub last_accessed: AtomicU64,
-    /// Per-segment first video frame PTS in video_timebase, in 90kHz units.
-    /// Written by the video segment generator (first_packet_pts after rescale).
-    /// Read by the audio segment generator to align tfdt with the first visible
-    /// video frame rather than the keyframe DTS (which differs by CT_offset).
-    /// Initialised to i64::MIN (= "not yet known").
+    /// Per-segment first displayable video frame PTS in 90kHz.
+    /// Written by the video generator (tfdt + first CT offset from trun).
+    /// Read by the audio generator to align audio tfdt with the first visible frame.
+    /// Initialised to i64::MIN (= not yet known).
     pub segment_first_pts: Arc<Vec<AtomicI64>>,
 }
 
@@ -181,22 +171,22 @@ impl StreamIndex {
         }
     }
 
-    /// Resize segment_first_pts to match segments length, initialising new slots to i64::MIN.
-    /// Call this after segments are populated.
+    /// Resize segment_first_pts to match segments length, initialising slots to i64::MIN.
+    /// Call after segments are populated.
     pub fn init_segment_first_pts(&mut self) {
         let n = self.segments.len();
         let v: Vec<AtomicI64> = (0..n).map(|_| AtomicI64::new(i64::MIN)).collect();
         self.segment_first_pts = Arc::new(v);
     }
 
-    /// Store the first video frame PTS (in 90kHz) for a segment.
+    /// Store the first displayable video frame PTS (90kHz) for a segment.
     pub fn set_segment_first_pts(&self, seq: usize, pts_90k: i64) {
         if let Some(slot) = self.segment_first_pts.get(seq) {
             slot.store(pts_90k, Ordering::Relaxed);
         }
     }
 
-    /// Read the first video frame PTS (in 90kHz) for a segment.
+    /// Read the first displayable video frame PTS (90kHz) for a segment.
     /// Returns None if not yet populated.
     pub fn get_segment_first_pts(&self, seq: usize) -> Option<i64> {
         self.segment_first_pts.get(seq).and_then(|slot| {

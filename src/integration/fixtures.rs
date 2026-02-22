@@ -129,7 +129,6 @@ impl TestMediaInfo {
                     language: Some("eng".to_string()),
                     profile: None,
                     level: None,
-                    encoder_delay: 0,
                 });
             }
         }
@@ -194,7 +193,6 @@ impl TestMediaInfo {
                 duration_secs: segment_duration,
                 is_keyframe: true,
                 video_byte_offset: (i * 100000) as u64,
-                first_video_pts: start_pts,
             });
         }
 
