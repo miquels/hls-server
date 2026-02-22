@@ -20,9 +20,8 @@ pub struct SubtitleDecoder {
 impl SubtitleDecoder {
     /// Create a new subtitle decoder
     pub fn new(codec_id: ffmpeg::codec::Id, stream_index: usize, timebase: ffmpeg::Rational) -> Result<Self> {
-        // Verify decoder exists using FFI
-        let codec_ptr = unsafe { ffmpeg::ffi::avcodec_find_decoder(codec_id.into()) };
-        if codec_ptr.is_null() {
+        // Verify decoder exists
+        if !crate::ffmpeg::helpers::decoder_exists(codec_id) {
             return Err(HlsError::Ffmpeg(
                 FfmpegError::DecoderNotFound(format!("Subtitle codec {:?} not found", codec_id))
             ));

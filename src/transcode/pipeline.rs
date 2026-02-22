@@ -301,9 +301,8 @@ fn rechunk_pcm_frames(
         let n = frame.samples();
         for ch in 0..channels {
             let data = frame.data(ch);
-            // SAFETY: FLTP plane = n * 4 bytes of native-endian f32
-            let floats: &[f32] =
-                unsafe { std::slice::from_raw_parts(data.as_ptr() as *const f32, n) };
+            let floats = crate::ffmpeg::helpers::fltp_plane_as_f32(data, n)
+                .expect("FLTP plane: bad alignment or length");
             bufs[ch].extend_from_slice(floats);
         }
     }
@@ -318,9 +317,8 @@ fn rechunk_pcm_frames(
         out.set_rate(rate);
         for ch in 0..channels {
             let plane = out.data_mut(ch);
-            // SAFETY: same FLTP layout as above
-            let floats_out: &mut [f32] =
-                unsafe { std::slice::from_raw_parts_mut(plane.as_mut_ptr() as *mut f32, n) };
+            let floats_out = crate::ffmpeg::helpers::fltp_plane_as_f32_mut(plane, n)
+                .expect("FLTP plane: bad alignment or length");
             floats_out.copy_from_slice(&bufs[ch][offset..offset + n]);
         }
         result.push(out);

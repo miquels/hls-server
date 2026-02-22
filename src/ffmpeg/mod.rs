@@ -7,6 +7,7 @@
 //! - Timebase conversion and other utilities
 
 pub mod context;
+pub mod helpers;
 pub mod index;
 pub mod io;
 pub mod utils;
@@ -35,7 +36,11 @@ pub fn init() -> Result<(), crate::error::FfmpegError> {
 ///
 /// Must be called after `ffmpeg::init()` and after `av_log_set_level`.
 pub fn install_log_filter() {
+    // SAFETY: both functions modify global FFmpeg state and are safe to call
+    // after `ffmpeg::init()`.  They are called exactly once at startup before
+    // any threads begin generating segments.
     unsafe {
+        ffmpeg_next::ffi::av_log_set_level(ffmpeg_next::ffi::AV_LOG_WARNING as i32);
         ffmpeg_next::ffi::av_log_set_callback(Some(ffmpeg_log_callback));
     }
 }

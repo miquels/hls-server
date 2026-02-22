@@ -9,16 +9,12 @@ pub fn analyze_video_stream(stream: &ffmpeg::Stream, index: usize) -> Result<Vid
     let codec_id = stream.parameters().id();
 
     // Get video dimensions, profile, level and bitrate from codec parameters
-    let (width, height, profile, level, bitrate) = unsafe {
-        let params_ptr = stream.parameters().as_ptr();
-        (
-            (*params_ptr).width as u32,
-            (*params_ptr).height as u32,
-            (*params_ptr).profile,
-            (*params_ptr).level,
-            (*params_ptr).bit_rate as u64,
-        )
-    };
+    let params = stream.parameters();
+    let width   = crate::ffmpeg::helpers::codec_params_width(&params);
+    let height  = crate::ffmpeg::helpers::codec_params_height(&params);
+    let profile = crate::ffmpeg::helpers::codec_params_profile(&params);
+    let level   = crate::ffmpeg::helpers::codec_params_level(&params);
+    let bitrate = crate::ffmpeg::helpers::codec_params_bit_rate(&params);
 
     // Get frame rate from stream
     let framerate = stream.avg_frame_rate();

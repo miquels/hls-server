@@ -146,14 +146,7 @@ impl AacEncoder {
     /// Built by copying the opened encoder's AVCodecContext back into a fresh
     /// AVCodecParameters struct.
     pub fn codec_parameters(&self) -> ffmpeg::codec::Parameters {
-        use std::ops::Deref;
-        use std::rc::Rc;
-        let ctx: &ffmpeg::codec::Context = self.encoder.deref();
-        unsafe {
-            let params = ffmpeg::ffi::avcodec_parameters_alloc();
-            ffmpeg::ffi::avcodec_parameters_from_context(params, ctx.as_ptr());
-            ffmpeg::codec::Parameters::wrap(params, None::<Rc<dyn std::any::Any>>)
-        }
+        crate::ffmpeg::helpers::encoder_codec_parameters(&self.encoder)
     }
 }
 

@@ -9,13 +9,9 @@ pub fn analyze_audio_stream(stream: &ffmpeg::Stream, index: usize) -> Result<Aud
     let codec_id = stream.parameters().id();
     
     // Get audio info from codec parameters
-    let (sample_rate, channels) = unsafe {
-        let params_ptr = stream.parameters().as_ptr();
-        (
-            (*params_ptr).sample_rate as u32,
-            (*params_ptr).ch_layout.nb_channels as u16
-        )
-    };
+    let params = stream.parameters();
+    let sample_rate = crate::ffmpeg::helpers::codec_params_sample_rate(&params);
+    let channels = crate::ffmpeg::helpers::codec_params_channels(&params);
 
     Ok(AudioStreamInfo {
         stream_index: index,

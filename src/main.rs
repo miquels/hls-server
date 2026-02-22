@@ -46,15 +46,8 @@ async fn main() -> Result<()> {
     tracing::info!("{} v{} starting", APP_NAME, VERSION);
     tracing::info!("FFmpeg version: {}", ffmpeg::version_info());
 
-    // Initialize FFmpeg
+    // Initialize FFmpeg and install log filter (sets AV_LOG_WARNING, suppresses known-noisy messages)
     ffmpeg::init()?;
-    // Set FFmpeg log level once at startup. AV_LOG_WARNING suppresses the
-    // verbose DEBUG/INFO output from the demuxer/muxer on every segment.
-    // Setting this in Fmp4Muxer::new() (per-segment) caused a global write
-    // race under concurrent requests and flooded stderr.
-    unsafe {
-        ffmpeg_next::ffi::av_log_set_level(ffmpeg_next::ffi::AV_LOG_WARNING as i32);
-    }
     ffmpeg::install_log_filter();
     tracing::info!("FFmpeg initialized successfully");
 

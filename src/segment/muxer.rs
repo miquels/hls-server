@@ -50,9 +50,7 @@ impl Fmp4Muxer {
 
         out_stream.set_parameters(params.clone());
         // Reset codec_tag to let the muxer decide the correct tag
-        unsafe {
-            (*(*out_stream.as_mut_ptr()).codecpar).codec_tag = 0;
-        }
+        crate::ffmpeg::helpers::stream_reset_codec_tag(&mut out_stream);
         // Set video timebase to standard 90kHz for HLS
         out_stream.set_time_base(ffmpeg::Rational::new(1, 90000));
 
@@ -82,12 +80,10 @@ impl Fmp4Muxer {
         out_stream.set_parameters(params.clone());
         // Reset codec_tag to let the muxer decide the correct tag for the container (mp4).
         // This is crucial when copying from other containers (like TS or Matroska).
-        unsafe {
-            (*(*out_stream.as_mut_ptr()).codecpar).codec_tag = 0;
-        }
+        crate::ffmpeg::helpers::stream_reset_codec_tag(&mut out_stream);
 
         // Set audio timebase to sample rate
-        let sample_rate = unsafe { (*params.as_ptr()).sample_rate as u32 };
+        let sample_rate = crate::ffmpeg::helpers::codec_params_sample_rate(params);
         if sample_rate > 0 {
             out_stream.set_time_base(ffmpeg::Rational::new(1, sample_rate as i32));
         }
@@ -285,17 +281,7 @@ fn parse_elst_in_boxes(data: &[u8]) -> Option<i64> {
 
 impl Drop for Fmp4Muxer {
     fn drop(&mut self) {
-        unsafe {
-            let ctx = self.output.as_mut_ptr();
-            // Detach pb from output context to prevent double-free.
-            // FFmpeg's avformat_free_context (called by Output::drop) will try to free pb if it's set.
-            // Since we allocated the buffer manually but lost track of strict ownership transfer to FFmpeg
-            // (or to avoid double-free if FFmpeg takes ownership), we detach it here.
-            // This leaks the buffer (4KB), but prevents SIGSEGV.
-            if !ctx.is_null() && !(*ctx).pb.is_null() {
-                (*ctx).pb = std::ptr::null_mut();
-            }
-        }
+        crate::ffmpeg::helpers::detach_avio(&mut self.output);
     }
 }
 
@@ -323,7 +309,8 @@ pub fn mux_aac_packets_to_fmp4(
         .add_stream(ffmpeg::encoder::find(ffmpeg::codec::Id::None))
         .map_err(|e| FfmpegError::StreamConfig(format!("add_stream: {}", e)))?;
     out_stream.set_parameters(codec_params.clone());
-    let sample_rate = unsafe { (*codec_params.as_ptr()).sample_rate as i32 }.max(1);
+    let sample_rate = crate::ffmpeg::helpers::codec_params_sample_rate(codec_params) as i32;
+    let sample_rate = sample_rate.max(1);
     out_stream.set_time_base(ffmpeg::Rational::new(1, sample_rate));
 
     // Write header with frag_every_frame so packets flush immediately
@@ -352,12 +339,7 @@ pub fn mux_aac_packets_to_fmp4(
 
     // Drop output BEFORE writer to avoid double-free of the AVIO pb pointer.
     // The Fmp4Muxer Drop impl sets pb=null; replicate that here.
-    unsafe {
-        let ctx = output.as_mut_ptr();
-        if !ctx.is_null() && !(*ctx).pb.is_null() {
-            (*ctx).pb = std::ptr::null_mut();
-        }
-    }
+    crate::ffmpeg::helpers::detach_avio(&mut output);
     drop(output);
     drop(writer);
 
@@ -603,13 +585,13 @@ mod tests {
             .expect("No audio stream in test video");
         let mut params = aac_stream.parameters();
 
-        unsafe {
-            let p = params.as_mut_ptr();
-            (*p).codec_id = ffmpeg::ffi::AVCodecID::AV_CODEC_ID_AC3;
-            (*p).frame_size = 1536;
-            (*p).bit_rate = 192000;
-            // sample_rate and ch_layout are already valid from the original AAC stream.
-        }
+        crate::ffmpeg::helpers::codec_params_set_for_test(
+            &mut params,
+            ffmpeg::ffi::AVCodecID::AV_CODEC_ID_AC3,
+            1536,
+            192000,
+        );
+        // sample_rate and ch_layout are already valid from the original AAC stream.
 
         let stream_index = aac_stream.index();
         muxer
