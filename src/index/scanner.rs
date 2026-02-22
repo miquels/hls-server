@@ -296,8 +296,13 @@ fn build_segments_from_entries(
                 seg_start_byte = entry.pos;
             }
         } else {
-            // First keyframe — start of first segment
-            seg_start_pts = Some(pts);
+            // First keyframe — start of first segment.
+            // Clamp to 0: some files have a negative first keyframe PTS due to
+            // B-frame pre-roll (e.g. pts=-1335 @ 1/16000). If we keep it negative,
+            // EXTINF(seg=0) = (start_pts(seg=1) - neg) / tb is inflated by |neg|,
+            // making the playlist timeline ahead of the segment tfdt values by that
+            // same amount — causing a seek double-jump.
+            seg_start_pts = Some(pts.max(0));
             seg_start_byte = entry.pos;
         }
     }

@@ -659,12 +659,12 @@ pub fn generate_subtitle_segment(
     Ok(bytes)
 }
 
-/// Parse the first displayable video frame PTS from a muxed fMP4 segment.
-/// Returns tfdt + first_sample_CT_offset (in the segment's native timebase, 90kHz for video).
+/// Parse the minimum display PTS across all samples in a muxed fMP4 segment.
+/// Scans every moof/traf/tfdt/trun box and returns the smallest (tfdt + sample_CT) value.
+/// This is the earliest frame display time, used to align audio tfdt.
 fn read_first_display_pts(data: &[u8]) -> Option<i64> {
+    let mut min_pts: Option<i64> = None;
     let mut pos = 0;
-    let mut tfdt_val: Option<i64> = None;
-    let mut first_ct: Option<i32> = None;
 
     while pos + 8 <= data.len() {
         let size = u32::from_be_bytes(data[pos..pos+4].try_into().ok()?) as usize;
@@ -675,9 +675,31 @@ fn read_first_display_pts(data: &[u8]) -> Option<i64> {
         match box_type {
             b"moof" | b"traf" => {
                 if let Some(v) = read_first_display_pts(content) {
-                    return Some(v);
+                    min_pts = Some(match min_pts {
+                        Some(cur) => cur.min(v),
+                        None => v,
+                    });
                 }
             }
+            b"tfdt" => {
+                // We need tfdt + trun samples. Handled at traf level via recursion.
+                let _ = content;
+            }
+            _ => {}
+        }
+        pos += size;
+    }
+
+    // If this is a traf, scan tfdt + trun together
+    let mut tfdt_val: Option<i64> = None;
+    pos = 0;
+    while pos + 8 <= data.len() {
+        let size = u32::from_be_bytes(data[pos..pos+4].try_into().ok()?) as usize;
+        let box_type = &data[pos+4..pos+8];
+        if size == 0 || pos + size > data.len() { break; }
+        let content = &data[pos+8..pos+size];
+
+        match box_type {
             b"tfdt" => {
                 let version = content[0];
                 tfdt_val = Some(if version == 1 {
@@ -687,20 +709,36 @@ fn read_first_display_pts(data: &[u8]) -> Option<i64> {
                 });
             }
             b"trun" => {
-                let version = content[0];
-                let flags = u32::from_be_bytes([0, content[1], content[2], content[3]]);
-                let mut off = 8usize;
-                if flags & 0x001 != 0 { off += 4; }
-                if flags & 0x004 != 0 { off += 4; }
-                if flags & 0x100 != 0 { off += 4; }
-                if flags & 0x200 != 0 { off += 4; }
-                if flags & 0x400 != 0 { off += 4; }
-                if flags & 0x800 != 0 && off + 4 <= content.len() {
-                    first_ct = Some(if version == 1 {
-                        i32::from_be_bytes(content[off..off+4].try_into().ok()?)
-                    } else {
-                        u32::from_be_bytes(content[off..off+4].try_into().ok()?) as i32
-                    });
+                if let Some(tfdt) = tfdt_val {
+                    let version = content[0];
+                    let flags = u32::from_be_bytes([0, content[1], content[2], content[3]]);
+                    let sc = u32::from_be_bytes(content[4..8].try_into().ok()?) as usize;
+                    let mut off = 8usize;
+                    if flags & 0x001 != 0 { off += 4; }
+                    if flags & 0x004 != 0 { off += 4; }
+                    let mut running_dts = tfdt;
+                    for _ in 0..sc {
+                        let dur = if flags & 0x100 != 0 {
+                            let v = u32::from_be_bytes(content[off..off+4].try_into().ok()?) as i64;
+                            off += 4; v
+                        } else { 0 };
+                        if flags & 0x200 != 0 { off += 4; }
+                        if flags & 0x400 != 0 { off += 4; }
+                        let ct = if flags & 0x800 != 0 && off + 4 <= content.len() {
+                            let v = if version == 1 {
+                                i32::from_be_bytes(content[off..off+4].try_into().ok()?) as i64
+                            } else {
+                                u32::from_be_bytes(content[off..off+4].try_into().ok()?) as i64
+                            };
+                            off += 4; v
+                        } else { 0 };
+                        let pts = running_dts + ct;
+                        min_pts = Some(match min_pts {
+                            Some(cur) => cur.min(pts),
+                            None => pts,
+                        });
+                        running_dts += dur;
+                    }
                 }
             }
             _ => {}
@@ -708,11 +746,7 @@ fn read_first_display_pts(data: &[u8]) -> Option<i64> {
         pos += size;
     }
 
-    if let (Some(tfdt), Some(ct)) = (tfdt_val, first_ct) {
-        Some(tfdt + ct as i64)
-    } else {
-        tfdt_val
-    }
+    min_pts
 }
 
 /// Generate a media segment using FFmpeg (CMAF-style fragmented MP4)
@@ -761,9 +795,15 @@ fn generate_media_segment_ffmpeg(
     let stream_idx = stream_index
         .ok_or_else(|| HlsError::StreamNotFound(format!("No {} stream found", segment_type)))?;
 
-    // Write header with delay_moov so the moov box is deferred and only moof/mdat
-    // fragments appear in the output (init bytes are discarded below).
-    let _init_bytes = muxer.write_header(true)?;
+    // Write header WITHOUT delay_moov for video segments.
+    // delay_moov causes FFmpeg to emit a pre-roll moof[0] containing B-frames with
+    // large composition-time offsets. Those frames display within the segment but
+    // their presence makes the first *displayable* PTS of the segment appear hundreds
+    // of milliseconds after the last displayable PTS of the previous segment —
+    // producing a visible freeze/jump at every segment boundary.
+    // Without delay_moov, the first moof starts at the keyframe DTS directly,
+    // giving smooth PTS continuity across segment boundaries.
+    let _init_bytes = muxer.write_header(segment_type != "video")?;
 
     // Encoder delay: the number of samples (in output timebase) that the codec
     // prepends as pre-roll before the first presented sample.  FFmpeg signals this
@@ -830,10 +870,12 @@ fn generate_media_segment_ffmpeg(
         }
 
         let pts = packet.pts().or(packet.dts()).unwrap_or(0);
+        let dts = packet.dts().or(packet.pts()).unwrap_or(0);
         let timebase = stream.time_base();
 
-        // Convert current packet PTS to 90kHz for comparison
+        // Convert current packet timestamps to 90kHz for comparison
         let pts_90k = crate::ffmpeg::utils::rescale_ts(pts, timebase, ffmpeg::Rational(1, 90000));
+        let dts_90k = crate::ffmpeg::utils::rescale_ts(dts, timebase, ffmpeg::Rational(1, 90000));
         // Convert segment boundaries (which are in video_timebase) to 90kHz
         let start_pts_90k = crate::ffmpeg::utils::rescale_ts(
             segment.start_pts,
@@ -847,25 +889,43 @@ fn generate_media_segment_ffmpeg(
         );
 
         tracing::trace!(
-            "Read packet: pts_90k={}, start_pts_90k={}, end_pts_90k={}",
-            pts_90k,
-            start_pts_90k,
-            end_pts_90k
+            "Read packet: pts_90k={}, dts_90k={}, start_pts_90k={}, end_pts_90k={}",
+            pts_90k, dts_90k, start_pts_90k, end_pts_90k
         );
 
-        // Check if we reached the end
-        if pts_90k >= end_pts_90k {
-            tracing::debug!(
-                "Reached segment end (pts_90k={}, end_pts_90k={}), stopping",
-                pts_90k,
-                end_pts_90k
-            );
-            break;
-        }
-
-        // Filter packets before start (due to seek inaccuracy)
-        if pts_90k < start_pts_90k {
-            continue;
+        // Video-specific segment boundary logic.
+        //
+        // Segment boundaries are defined by keyframe DTS values. For video:
+        //
+        // Stop condition: stop when we see the next segment's keyframe (is_key AND dts >= end_pts).
+        // Non-keyframe B-frames with dts >= end_pts still display within this segment
+        // (their PTS < end_pts + ct_offset) and must be written.
+        //
+        // Start filter: exclude pre-roll B-frames with DTS < start_pts. These frames
+        // decode before this segment's keyframe and are already in the previous segment.
+        // Using DTS (not PTS) is correct: pre-roll B-frames always have DTS < keyframe DTS.
+        //
+        // Audio uses PTS-based filtering (below) since it has no B-frames.
+        if segment_type == "video" {
+            let is_keyframe = packet.is_key();
+            if is_keyframe && dts_90k >= end_pts_90k {
+                tracing::debug!(
+                    "Reached segment end at keyframe (dts_90k={}, end_pts_90k={}), stopping",
+                    dts_90k, end_pts_90k
+                );
+                break;
+            }
+            if dts_90k < start_pts_90k {
+                continue;
+            }
+        } else {
+            // Audio: simple PTS-based range filter
+            if pts_90k >= end_pts_90k {
+                break;
+            }
+            if pts_90k < start_pts_90k {
+                continue;
+            }
         }
 
         // Rescale packet timestamps to output stream timebase
@@ -893,6 +953,20 @@ fn generate_media_segment_ffmpeg(
                 } else if first_packet_dts.is_none() {
                     // Fallback: use rescaled PTS if DTS is absent
                     first_packet_dts = Some(out_pts);
+                }
+
+                // Always set the packet duration explicitly (rescaled to output tb).
+                // FFmpeg normally computes trun sample duration as next_dts - current_dts.
+                // When the packet loop stops before writing the next packet (at segment
+                // boundary), the last sample gets a wrong duration — typically a tiny
+                // residual value (e.g. 672 ticks instead of 3780). This causes a DTS
+                // discontinuity at the segment boundary and a visible glitch.
+                // Using the demuxer's own duration value (which is always correct) for
+                // every packet prevents this.
+                let in_dur = packet.duration();
+                if in_dur > 0 {
+                    let out_dur = in_dur.rescale(in_tb, out_tb);
+                    packet.set_duration(out_dur);
                 }
 
                 // Keep the trace log for detailed debugging if needed
@@ -985,17 +1059,21 @@ fn generate_media_segment_ffmpeg(
 
         // Calculate target time in the OUTPUT timebase.
         //
-        // For VIDEO: use base_dts (the actual first packet DTS). This keeps DTS
-        // continuity across segments — FFmpeg emits a pre-roll B-frame fragment
-        // whose natural tfdt IS base_dts. Patching to start_pts_rescaled (keyframe PTS)
-        // instead creates a DTS gap of (CT_offset) at every segment boundary → glitch.
-        // base_dts may be negative at seg=0 (B-frame pre-roll before t=0); clamp to 0.
+        // For VIDEO: use start_pts_rescaled (keyframe PTS, same value the playlist
+        // #EXTINF durations are derived from). This keeps the segment's self-reported
+        // tfdt consistent with the playlist timeline, so the player can seek precisely
+        // without a double-jump. The pre-roll B-frame moof[0] gets its tfdt shifted
+        // by the same delta (start_pts_rescaled - base_dts), which is a small negative
+        // offset that the player handles gracefully.
         //
         // For AUDIO: use the cached first_video_pts_90k (tfdt+CT from the video segment)
         // rescaled to audio tb, plus encoder_delay, so the player computes:
         //   (audio_tfdt - elst) / timescale == first_display_video_pts
+        let start_pts_rescaled = crate::ffmpeg::utils::rescale_ts(
+            segment.start_pts, video_timebase, output_timebase,
+        );
         let target_time = if segment_type == "video" {
-            base_dts.max(0) as u64
+            start_pts_rescaled.max(0) as u64
         } else {
             // Audio: align to first displayable video frame.
             // first_video_pts_90k is tfdt+CT from the video segment (set by read_first_display_pts).
@@ -1026,7 +1104,7 @@ fn generate_media_segment_ffmpeg(
             segment_type, segment.sequence, target_time,
             output_timebase.numerator(), output_timebase.denominator(),
             base_dts,
-            crate::ffmpeg::utils::rescale_ts(segment.start_pts, video_timebase, output_timebase),
+            start_pts_rescaled,
             encoder_delay
         );
 
