@@ -177,6 +177,70 @@ pub fn fltp_plane_as_f32_mut(byte_slice: &mut [u8], sample_count: usize) -> Opti
     if ptr as usize % std::mem::align_of::<f32>() != 0 {
         return None;
     }
-    // SAFETY: alignment and length are verified above.
     Some(unsafe { std::slice::from_raw_parts_mut(ptr as *mut f32, sample_count) })
+}
+
+/// Extract an audio plane slice from an `AVFrame`.
+///
+/// Works around a bug in `ffmpeg-next`'s `Audio::data(index)` method where it
+/// stops counting planes if `linesize[1] == 0`. In FFmpeg, planar audio frames
+/// often only populate `linesize[0]` to represent the size of *every* plane.
+pub fn audio_plane_data(frame: &ffmpeg::util::frame::Audio, index: usize) -> &[u8] {
+    unsafe {
+        let f = frame.as_ptr();
+        let channels = (*f).ch_layout.nb_channels as usize;
+
+        // Ensure index is valid for planar; packed has only 1 data plane.
+        let is_planar = frame.format().is_planar();
+        if is_planar {
+            if index >= channels {
+                return &[];
+            }
+        } else if index > 0 {
+            return &[];
+        }
+
+        let ptrs = (*f).extended_data;
+        if ptrs.is_null() {
+            return &[];
+        }
+
+        let plane_ptr = *ptrs.add(index);
+        if plane_ptr.is_null() {
+            return &[];
+        }
+
+        let size = (*f).linesize[0] as usize;
+        std::slice::from_raw_parts(plane_ptr, size)
+    }
+}
+
+/// Mutable version of `audio_plane_data`.
+pub fn audio_plane_data_mut(frame: &mut ffmpeg::util::frame::Audio, index: usize) -> &mut [u8] {
+    unsafe {
+        let f = frame.as_mut_ptr();
+        let channels = (*f).ch_layout.nb_channels as usize;
+
+        let is_planar = frame.format().is_planar();
+        if is_planar {
+            if index >= channels {
+                return &mut [];
+            }
+        } else if index > 0 {
+            return &mut [];
+        }
+
+        let ptrs = (*f).extended_data;
+        if ptrs.is_null() {
+            return &mut [];
+        }
+
+        let plane_ptr = *ptrs.add(index);
+        if plane_ptr.is_null() {
+            return &mut [];
+        }
+
+        let size = (*f).linesize[0] as usize;
+        std::slice::from_raw_parts_mut(plane_ptr, size)
+    }
 }

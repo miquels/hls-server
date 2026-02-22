@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Path, State},
+    extract::State,
     http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     Json,
@@ -76,16 +76,15 @@ pub async fn version_check() -> Json<serde_json::Value> {
 }
 
 /// Master playlist endpoint
-/// GET /streams/{id}/master.m3u8
+/// Master playlist logic
 pub async fn master_playlist(
-    State(state): State<Arc<AppState>>,
-    Path(stream_id): Path<String>,
+    state: &AppState,
+    stream_id: &str,
+    prefix: &str,
 ) -> Result<Response, HttpError> {
-    let media = state.get_media_or_error(&stream_id)?;
+    let media = state.get_media_or_error(stream_id)?;
 
-    // Master playlist always has the same prefix for now
-    let prefix = format!("/streams/{}", stream_id);
-    let playlist = hls_vod_lib::api::generate_main_playlist(&media, &prefix)?;
+    let playlist = hls_vod_lib::api::generate_main_playlist(&media, prefix)?;
 
     let mut headers = HeaderMap::new();
     headers.insert(
@@ -98,12 +97,9 @@ pub async fn master_playlist(
 }
 
 /// Video variant playlist endpoint
-/// GET /streams/{id}/video/media.m3u8
-pub async fn video_playlist(
-    State(state): State<Arc<AppState>>,
-    Path(stream_id): Path<String>,
-) -> Result<Response, HttpError> {
-    let media = state.get_media_or_error(&stream_id)?;
+/// Video variant playlist logic
+pub async fn video_playlist(state: &AppState, stream_id: &str) -> Result<Response, HttpError> {
+    let media = state.get_media_or_error(stream_id)?;
 
     let playlist_id = "v/media.m3u8";
     let playlist = hls_vod_lib::api::generate_track_playlist(&media, playlist_id)?;
@@ -119,13 +115,14 @@ pub async fn video_playlist(
 }
 
 /// Audio variant playlist endpoint
-/// GET /streams/{id}/audio/{track_index}.m3u8
-/// GET /streams/{id}/audio/{track_index}-aac.m3u8
+/// Audio variant playlist logic
 pub async fn audio_playlist(
-    State(state): State<Arc<AppState>>,
-    Path((stream_id, track_index, force_aac)): Path<(String, usize, bool)>,
+    state: &AppState,
+    stream_id: &str,
+    track_index: usize,
+    force_aac: bool,
 ) -> Result<Response, HttpError> {
-    let media = state.get_media_or_error(&stream_id)?;
+    let media = state.get_media_or_error(stream_id)?;
 
     let playlist_id = if force_aac {
         format!("a/{}-aac.m3u8", track_index)
@@ -146,12 +143,13 @@ pub async fn audio_playlist(
 }
 
 /// Subtitle variant playlist endpoint
-/// GET /streams/{id}/sub/{track_index}.m3u8
+/// Subtitle variant playlist logic
 pub async fn subtitle_playlist(
-    State(state): State<Arc<AppState>>,
-    Path((stream_id, track_index)): Path<(String, usize)>,
+    state: &AppState,
+    stream_id: &str,
+    track_index: usize,
 ) -> Result<Response, HttpError> {
-    let media = state.get_media_or_error(&stream_id)?;
+    let media = state.get_media_or_error(stream_id)?;
 
     let playlist_id = format!("s/{}.m3u8", track_index);
     let playlist = hls_vod_lib::api::generate_track_playlist(&media, &playlist_id)?;
@@ -167,12 +165,9 @@ pub async fn subtitle_playlist(
 }
 
 /// Video init segment endpoint (video track only)
-/// GET /streams/{id}/video/init.mp4
-pub async fn video_init_segment(
-    State(state): State<Arc<AppState>>,
-    Path(stream_id): Path<String>,
-) -> Result<Response, HttpError> {
-    let media = state.get_media_or_error(&stream_id)?;
+/// Video init segment logic
+pub async fn video_init_segment(state: &AppState, stream_id: &str) -> Result<Response, HttpError> {
+    let media = state.get_media_or_error(stream_id)?;
 
     let segment_id = "v/init.mp4";
     let bytes = hls_vod_lib::api::generate_segment(&media, segment_id)?;
@@ -188,12 +183,14 @@ pub async fn video_init_segment(
 }
 
 /// Audio init segment endpoint
-/// GET /streams/{id}/audio/{track_index}/init.mp4
+/// Audio init segment logic
 pub async fn audio_init_segment(
-    State(state): State<Arc<AppState>>,
-    Path((stream_id, track_index, force_aac)): Path<(String, usize, bool)>,
+    state: &AppState,
+    stream_id: &str,
+    track_index: usize,
+    force_aac: bool,
 ) -> Result<Response, HttpError> {
-    let media = state.get_media_or_error(&stream_id)?;
+    let media = state.get_media_or_error(stream_id)?;
 
     let segment_id = if force_aac {
         format!("a/{}-aac/init.mp4", track_index)
@@ -214,15 +211,16 @@ pub async fn audio_init_segment(
 }
 
 /// Video media segment endpoint
-/// GET /streams/{id}/video/{track_index}.{sequence}.m4s
+/// Video media segment logic
 pub async fn video_segment(
-    State(state): State<Arc<AppState>>,
-    Path((stream_id, _track_index, sequence)): Path<(String, usize, usize)>,
+    state: &AppState,
+    stream_id: &str,
+    sequence: usize,
 ) -> Result<Response, HttpError> {
-    let media = state.get_media_or_error(&stream_id)?;
+    let media = state.get_media_or_error(stream_id)?;
 
     // Cache lookup
-    if let Some(bytes) = state.segment_cache.get(&stream_id, "v", sequence) {
+    if let Some(bytes) = state.segment_cache.get(stream_id, "v", sequence) {
         debug!("Cache hit for video segment: v:{}", sequence);
         let mut headers = HeaderMap::new();
         headers.insert(
@@ -242,7 +240,7 @@ pub async fn video_segment(
     // Update cache
     state
         .segment_cache
-        .insert(&stream_id, "v", sequence, Bytes::from(bytes.clone()));
+        .insert(stream_id, "v", sequence, Bytes::from(bytes.clone()));
 
     let mut headers = HeaderMap::new();
     headers.insert(
@@ -258,12 +256,15 @@ pub async fn video_segment(
 }
 
 /// Audio media segment endpoint
-/// GET /streams/{id}/audio/{track_index}.{sequence}.m4s
+/// Audio media segment logic
 pub async fn audio_segment(
-    State(state): State<Arc<AppState>>,
-    Path((stream_id, track_index, sequence, force_aac)): Path<(String, usize, usize, bool)>,
+    state: &AppState,
+    stream_id: &str,
+    track_index: usize,
+    sequence: usize,
+    force_aac: bool,
 ) -> Result<Response, HttpError> {
-    let media = state.get_media_or_error(&stream_id)?;
+    let media = state.get_media_or_error(stream_id)?;
 
     // Cache lookup
     let segment_type = if force_aac {
@@ -272,7 +273,7 @@ pub async fn audio_segment(
         format!("a:{}", track_index)
     };
 
-    if let Some(bytes) = state.segment_cache.get(&stream_id, &segment_type, sequence) {
+    if let Some(bytes) = state.segment_cache.get(stream_id, &segment_type, sequence) {
         debug!("Cache hit for audio segment: {}:{}", segment_type, sequence);
         let mut headers = HeaderMap::new();
         headers.insert(
@@ -296,7 +297,7 @@ pub async fn audio_segment(
 
     // Update cache
     state.segment_cache.insert(
-        &stream_id,
+        stream_id,
         &segment_type,
         sequence,
         Bytes::from(bytes.clone()),
@@ -316,18 +317,17 @@ pub async fn audio_segment(
 }
 
 /// Subtitle media segment endpoint
-/// GET /streams/{id}/sub/{track_index}.{sequence}.vtt
+/// Subtitle media segment logic
 pub async fn subtitle_segment(
-    State(state): State<Arc<AppState>>,
-    Path((stream_id, track_index, start_seq, end_seq)): Path<(String, usize, usize, usize)>,
+    state: &AppState,
+    stream_id: &str,
+    track_index: usize,
+    start_seq: usize,
+    end_seq: usize,
 ) -> Result<Response, HttpError> {
-    let media = state.get_media_or_error(&stream_id)?;
+    let media = state.get_media_or_error(stream_id)?;
 
-    let segment_id = if start_seq == end_seq {
-        format!("s/{}/{}.vtt", track_index, start_seq)
-    } else {
-        format!("s/{}/{}-{}.vtt", track_index, start_seq, end_seq)
-    };
+    let segment_id = format!("s/{}/{}-{}.vtt", track_index, start_seq, end_seq);
 
     let bytes = hls_vod_lib::api::generate_segment(&media, &segment_id)?;
 

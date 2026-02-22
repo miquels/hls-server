@@ -305,6 +305,35 @@ mod tests {
     }
 
     #[test]
+    fn test_opus_transcode_e2e() {
+        let mut asset_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        asset_path.push("../tests/assets/bun33s.webm");
+
+        if !asset_path.exists() {
+            println!("Skipping since {:?} doesn't exist", asset_path);
+            return;
+        }
+
+        let media = crate::api::parse_file(&asset_path, true).expect("Failed to scan webm asset");
+        let prefix = format!("/streams/{}", media.index.stream_id);
+
+        // Find audio
+        let audio_stream = media.index.audio_streams.first().unwrap();
+        let segment = media.index.segments.first().unwrap();
+
+        // transcode audio to aac
+        let (packets, _) = crate::transcode::pipeline::transcode_audio_segment(
+            &asset_path,
+            audio_stream,
+            segment,
+            media.index.video_timebase,
+        )
+        .unwrap();
+
+        assert!(!packets.is_empty(), "Expected some AAC packets");
+    }
+
+    #[test]
     fn test_benchmark_segment_generation() {
         let result = benchmark_segment_generation(100);
         println!("{}", result);

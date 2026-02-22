@@ -300,9 +300,9 @@ fn rechunk_pcm_frames(
     for frame in &frames {
         let n = frame.samples();
         for ch in 0..channels {
-            let data = frame.data(ch);
+            let data = crate::ffmpeg_utils::helpers::audio_plane_data(frame, ch);
             let floats = crate::ffmpeg_utils::helpers::fltp_plane_as_f32(data, n)
-                .expect("FLTP plane: bad alignment or length");
+                .unwrap_or_else(|| panic!("FLTP plane: bad alignment or length. format={:?}, channels={}, ch={}, n={}, data.len()={}, ptr_align={}", format, channels, ch, n, data.len(), data.as_ptr() as usize % 4));
             bufs[ch].extend_from_slice(floats);
         }
     }
@@ -316,7 +316,7 @@ fn rechunk_pcm_frames(
         let mut out = ffmpeg::util::frame::Audio::new(format, n, layout);
         out.set_rate(rate);
         for ch in 0..channels {
-            let plane = out.data_mut(ch);
+            let plane = crate::ffmpeg_utils::helpers::audio_plane_data_mut(&mut out, ch);
             let floats_out = crate::ffmpeg_utils::helpers::fltp_plane_as_f32_mut(plane, n)
                 .expect("FLTP plane: bad alignment or length");
             floats_out.copy_from_slice(&bufs[ch][offset..offset + n]);

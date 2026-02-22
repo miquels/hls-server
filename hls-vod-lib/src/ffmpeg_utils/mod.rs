@@ -50,6 +50,9 @@ const SUPPRESSED_MESSAGES: &[&str] = &[
     "No meaningful edit list will be written when using empty_moov without delay_moov",
     "starts with a nonzero dts",
     "Set the delay_moov flag to handle this case",
+    "Could not update timestamps for skipped samples",
+    "Could not update timestamps for discarded samples",
+    "Error parsing Opus packet header",
 ];
 
 unsafe extern "C" fn ffmpeg_log_callback(

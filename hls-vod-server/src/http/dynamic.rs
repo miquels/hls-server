@@ -1,7 +1,3 @@
-use axum::{
-    extract::{Path, State},
-    response::Response,
-};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -55,9 +51,9 @@ pub fn parse_path(full_path: &str) -> Option<(PathBuf, String)> {
 
 /// Dynamic request handler mapped to `/*path`
 pub async fn handle_dynamic_request(
-    State(state): State<Arc<AppState>>,
-    Path(path): Path<String>,
-) -> Result<Response, HttpError> {
+    axum::extract::State(state): axum::extract::State<Arc<AppState>>,
+    axum::extract::Path(path): axum::extract::Path<String>,
+) -> Result<axum::response::Response, HttpError> {
     let (media_path, suffix) = parse_path(&path).ok_or_else(|| {
         HttpError::SegmentNotFound(format!(
             "Invalid path format or missing media file: {}",
@@ -119,13 +115,19 @@ pub async fn handle_dynamic_request(
     let stream_id = media.index.stream_id.clone();
 
     if suffix == "master.m3u8" {
-        return super::handlers::master_playlist(State(state), Path(stream_id)).await;
+        // Build the correct relative prefix (the basename of the media file, e.g. "bigbucks.mp4")
+        let filename = media_path
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        return super::handlers::master_playlist(&state, &stream_id, &filename).await;
     } else if suffix == "v/media.m3u8" {
-        return super::handlers::video_playlist(State(state), Path(stream_id)).await;
+        return super::handlers::video_playlist(&state, &stream_id).await;
     } else if let Some(sub) = suffix.strip_prefix("v/") {
         if let Some(_track_str) = sub.strip_suffix(".init.mp4") {
             // we could parse track_index but video_init_segment generates for primary video
-            return super::handlers::video_init_segment(State(state), Path(stream_id)).await;
+            return super::handlers::video_init_segment(&state, &stream_id).await;
         } else if let Some(rest) = sub.strip_suffix(".m4s") {
             let parts: Vec<&str> = rest.split('.').collect();
             if parts.len() == 2 {
@@ -135,8 +137,7 @@ pub async fn handle_dynamic_request(
                 let seq = parts[1]
                     .parse::<usize>()
                     .map_err(|_| HttpError::SegmentNotFound("Invalid video seq".into()))?;
-                return super::handlers::video_segment(State(state), Path((stream_id, track, seq)))
-                    .await;
+                return super::handlers::video_segment(&state, &stream_id, seq).await;
             }
         }
     } else if let Some(sub) = suffix.strip_prefix("a/") {
@@ -149,11 +150,7 @@ pub async fn handle_dynamic_request(
             let track = track_str
                 .parse::<usize>()
                 .map_err(|_| HttpError::SegmentNotFound("Invalid audio track".into()))?;
-            return super::handlers::audio_playlist(
-                State(state),
-                Path((stream_id, track, force_aac)),
-            )
-            .await;
+            return super::handlers::audio_playlist(&state, &stream_id, track, force_aac).await;
         } else if let Some(mut track_str) = sub.strip_suffix(".init.mp4") {
             let mut force_aac = false;
             if let Some(base) = track_str.strip_suffix("-aac") {
@@ -163,11 +160,7 @@ pub async fn handle_dynamic_request(
             let track = track_str
                 .parse::<usize>()
                 .map_err(|_| HttpError::SegmentNotFound("Invalid audio track".into()))?;
-            return super::handlers::audio_init_segment(
-                State(state),
-                Path((stream_id, track, force_aac)),
-            )
-            .await;
+            return super::handlers::audio_init_segment(&state, &stream_id, track, force_aac).await;
         } else if let Some(rest) = sub.strip_suffix(".m4s") {
             let parts: Vec<&str> = rest.split('.').collect();
             if parts.len() == 2 {
@@ -183,11 +176,8 @@ pub async fn handle_dynamic_request(
                 let seq = parts[1]
                     .parse::<usize>()
                     .map_err(|_| HttpError::SegmentNotFound("Invalid audio seq".into()))?;
-                return super::handlers::audio_segment(
-                    State(state),
-                    Path((stream_id, track, seq, force_aac)),
-                )
-                .await;
+                return super::handlers::audio_segment(&state, &stream_id, track, seq, force_aac)
+                    .await;
             }
         }
     } else if let Some(sub) = suffix.strip_prefix("s/") {
@@ -195,8 +185,7 @@ pub async fn handle_dynamic_request(
             let track = track_str
                 .parse::<usize>()
                 .map_err(|_| HttpError::SegmentNotFound("Invalid subtitle track".into()))?;
-            return super::handlers::subtitle_playlist(State(state), Path((stream_id, track)))
-                .await;
+            return super::handlers::subtitle_playlist(&state, &stream_id, track).await;
         } else if let Some(rest) = sub.strip_suffix(".vtt") {
             let parts: Vec<&str> = rest.split('.').collect();
             if parts.len() == 2 {
@@ -216,11 +205,8 @@ pub async fn handle_dynamic_request(
                     (seq, seq)
                 };
 
-                // The handler logic only needs the precise range of segments to generate.
-                // We'll update handlers::subtitle_segment to take (start_seq, end_seq).
                 return super::handlers::subtitle_segment(
-                    State(state),
-                    Path((stream_id, track, start_seq, end_seq)),
+                    &state, &stream_id, track, start_seq, end_seq,
                 )
                 .await;
             }
