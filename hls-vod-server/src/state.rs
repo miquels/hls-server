@@ -10,41 +10,10 @@
 use crate::config::ServerConfig;
 use bytes::Bytes;
 use dashmap::DashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use hls_vod_lib::MediaInfo;
-
-/// Cache entry with metadata
-#[derive(Debug, Clone)]
-pub struct CacheEntry {
-    pub data: Bytes,
-    pub created_at: SystemTime,
-    pub last_accessed: SystemTime,
-    pub access_count: usize,
-}
-
-impl CacheEntry {
-    pub fn new(data: Bytes) -> Self {
-        let now = SystemTime::now();
-        Self {
-            data,
-            created_at: now,
-            last_accessed: now,
-            access_count: 1,
-        }
-    }
-
-    pub fn touch(&mut self) {
-        self.last_accessed = SystemTime::now();
-        self.access_count += 1;
-    }
-
-    pub fn age_secs(&self) -> u64 {
-        self.created_at.elapsed().map(|d| d.as_secs()).unwrap_or(0)
-    }
-}
 
 /// Application state shared across all handlers
 pub struct AppState {

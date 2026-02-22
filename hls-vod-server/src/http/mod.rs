@@ -13,6 +13,5 @@ pub mod dynamic;
 pub mod handlers;
 pub mod middleware;
 pub mod routes;
-pub mod streams;
 
 pub use routes::create_router;

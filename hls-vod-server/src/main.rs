@@ -23,7 +23,6 @@ use crate::config::ServerConfig;
 use crate::error::Result;
 use crate::http::create_router;
 use crate::state::AppState;
-use hls_vod_lib::ffmpeg;
 
 /// Application version
 const VERSION: &str = env!("CARGO_PKG_VERSION");
