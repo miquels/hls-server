@@ -1,6 +1,6 @@
 //! Custom AVIOContext for in-memory writing
 //!
-//! This module provides a custom IO context that writes to a Vec<u8>
+//! This module provides a custom IO context that writes to a `Vec<u8>`
 //! instead of a file, enabling completely in-memory muxing.
 //!
 //! # Thread safety

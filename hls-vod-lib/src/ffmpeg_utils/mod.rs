@@ -15,10 +15,11 @@ pub use ffmpeg_next as ffmpeg;
 #[allow(unused_imports)]
 pub use utils::*;
 
-/// Initialize FFmpeg library
+/// Initialize the FFmpeg library.
 ///
-/// This should be called once at application startup.
-/// Returns an error if FFmpeg fails to initialize.
+/// This should be called exactly once at application startup before any other
+/// FFmpeg-related functions (like `parse_file` or `generate_segment`) are used.
+/// Returns an error if the underlying C library fails to initialize context structures.
 pub fn init() -> Result<(), crate::error::FfmpegError> {
     ffmpeg::init().map_err(|e| {
         crate::error::FfmpegError::InitFailed(format!("ffmpeg::init() failed: {}", e))
@@ -29,11 +30,14 @@ pub fn init() -> Result<(), crate::error::FfmpegError> {
     Ok(())
 }
 
-/// Install a custom FFmpeg log callback that suppresses known-noisy messages
-/// which are expected side-effects of our deliberate muxer configuration
-/// (no delay_moov, empty_moov, early packet-loop termination).
+/// Install a custom FFmpeg log callback that suppresses known-noisy messages.
 ///
-/// Must be called after `ffmpeg::init()` and after `av_log_set_level`.
+/// When muxing HLS streams on the fly (especially using `empty_moov` without `delay_moov`
+/// to reduce latency), FFmpeg emits many warnings that are expected side-effects of this
+/// deliberate muxer configuration. This function filters them out so they don't pollute the application log.
+///
+/// **Safety & Ordering:** Must be called after `init()` and before any threading begins,
+/// because altering the global log callback is not thread-safe.
 pub fn install_log_filter() {
     // SAFETY: both functions modify global FFmpeg state and are safe to call
     // after `ffmpeg::init()`.  They are called exactly once at startup before
@@ -92,7 +96,8 @@ unsafe extern "C" fn ffmpeg_log_callback(
     eprint!("{}", msg);
 }
 
-/// Get FFmpeg version information
+/// Get the version information of the linked FFmpeg libraries.
+/// Useful for debugging and reporting environment consistency.
 pub fn version_info() -> String {
     // Return a simple version string since the API changed in FFmpeg 8.0
     "FFmpeg 8.0+".to_string()
