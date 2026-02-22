@@ -81,7 +81,9 @@ pub async fn handle_dynamic_request(
             )));
         }
         info!("Indexing new file: {:?}", media_path);
-        let new_index = scan_file(&media_path)
+        let new_index = tokio::task::spawn_blocking(move || scan_file(&media_path))
+            .await
+            .map_err(|e| HttpError::InternalError(e.to_string()))?
             .map_err(|e| HttpError::InternalError(format!("Failed to index file: {}", e)))?;
         state.register_stream(new_index)
     };

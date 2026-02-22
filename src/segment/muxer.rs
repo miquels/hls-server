@@ -16,12 +16,7 @@ pub struct Fmp4Muxer {
 impl Fmp4Muxer {
     /// Create a new fMP4 muxer
     pub fn new() -> Result<Self> {
-        ffmpeg::init().map_err(|e| FfmpegError::InitFailed(e.to_string()))?;
-
         let (output, writer) = create_memory_io()?;
-        unsafe {
-            ffmpeg::ffi::av_log_set_level(ffmpeg::ffi::AV_LOG_DEBUG);
-        }
 
         // Critical options for fMP4/HLS
         // frag_keyframe: Fragment at every keyframe (we control this by inputs usually,
@@ -170,14 +165,6 @@ impl Fmp4Muxer {
             packet.set_stream(out_index);
             packet.set_position(-1); // Unset byte position
 
-            eprintln!(
-                "[MUXER] Writing packet: stream={}, pts={:?}, dts={:?}, dur={}",
-                out_index,
-                packet.pts(),
-                packet.dts(),
-                packet.duration()
-            );
-
             // Rescale timestamps happens here or caller?
             // Usually caller (repackage function) handles rescaling if inputs differ.
             // But if we just copy params, timebases might differ.
@@ -210,7 +197,7 @@ impl Fmp4Muxer {
         if let Err(e) = self.output.write_trailer() {
             // Log warning but continue if we have data.
             // Some FFmpeg versions/configs return error on custom IO trailer writing (e.g. -67 EPROCLIM/ENOLINK?)
-            tracing::warn!(
+            tracing::debug!(
                 "Failed to write trailer: {}, proceeding with available data",
                 e
             );

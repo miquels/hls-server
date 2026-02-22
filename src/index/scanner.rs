@@ -55,8 +55,6 @@ pub fn scan_file_with_options<P: AsRef<Path>>(
 ) -> Result<StreamIndex> {
     let path = path.as_ref().to_path_buf();
 
-    ffmpeg::init().map_err(|e| FfmpegError::InitFailed(format!("ffmpeg::init() failed: {}", e)))?;
-
     // Opening the file parses moov/cues and populates the demuxer index.
     // No media data is read at this point.
     let mut context = ffmpeg::format::input(&path)

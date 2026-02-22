@@ -2,17 +2,24 @@
 //!
 //! This module provides a custom IO context that writes to a Vec<u8>
 //! instead of a file, enabling completely in-memory muxing.
+//!
+//! # Thread safety
+//! `MemoryWriter` is intentionally NOT thread-safe. Each muxer instance is
+//! created and consumed on a single thread (inside `spawn_blocking`). Using a
+//! plain `Vec<u8>` avoids the `Arc<Mutex<Vec>>` re-entrancy deadlock: FFmpeg
+//! can call `seek_packet` from within `write_packet` (e.g. during
+//! `write_trailer` to query the buffer size), and `std::sync::Mutex` is not
+//! reentrant — the nested `lock()` call on the same thread would deadlock.
 
 use ffmpeg_next as ffmpeg;
 use std::ffi::c_void;
 use std::io::{Seek, SeekFrom, Write};
 use std::ptr;
-use std::sync::{Arc, Mutex};
 
 /// Custom IO context that writes to an in-memory buffer.
-/// It must be thread-safe if used across threads, but simple Box is enough for single-threaded muxing.
+/// Single-threaded use only — one instance per muxer, never shared across threads.
 pub struct MemoryWriter {
-    buffer: Arc<Mutex<Vec<u8>>>,
+    buffer: Vec<u8>,
     position: u64,
 }
 
@@ -20,45 +27,38 @@ impl MemoryWriter {
     /// Create a new memory writer
     pub fn new() -> Self {
         Self {
-            buffer: Arc::new(Mutex::new(Vec::with_capacity(4096))),
+            buffer: Vec::with_capacity(4096),
             position: 0,
         }
     }
 
-    /// Get a clone of the buffer (thread-safe)
-    pub fn buffer(&self) -> Arc<Mutex<Vec<u8>>> {
-        self.buffer.clone()
-    }
-
     /// Get a copy of the written data
     pub fn data(&self) -> Vec<u8> {
-        self.buffer.lock().unwrap().clone()
+        self.buffer.clone()
     }
 
     /// Check if the buffer is empty
     pub fn is_empty(&self) -> bool {
-        self.buffer.lock().unwrap().is_empty()
+        self.buffer.is_empty()
     }
 
     /// Clear the buffer
     pub fn clear(&mut self) {
-        self.buffer.lock().unwrap().clear();
+        self.buffer.clear();
         self.position = 0;
     }
 }
 
 impl Write for MemoryWriter {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        let mut buffer = self.buffer.lock().unwrap();
-
         let pos = self.position as usize;
         let end = pos + buf.len();
 
-        if end > buffer.len() {
-            buffer.resize(end, 0);
+        if end > self.buffer.len() {
+            self.buffer.resize(end, 0);
         }
 
-        buffer[pos..end].copy_from_slice(buf);
+        self.buffer[pos..end].copy_from_slice(buf);
         self.position += buf.len() as u64;
 
         Ok(buf.len())
@@ -71,7 +71,7 @@ impl Write for MemoryWriter {
 
 impl Seek for MemoryWriter {
     fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
-        let buffer_len = self.buffer.lock().unwrap().len() as u64;
+        let buffer_len = self.buffer.len() as u64;
 
         let new_pos = match pos {
             SeekFrom::Start(p) => p,
@@ -90,18 +90,11 @@ impl Default for MemoryWriter {
     }
 }
 
-impl Drop for MemoryWriter {
-    fn drop(&mut self) {
-        eprintln!("Dropping MemoryWriter at {:p}", self);
-    }
-}
-
 // C-compatible callbacks for FFmpeg
 
 unsafe extern "C" fn write_packet(opaque: *mut c_void, buf: *const u8, buf_size: i32) -> i32 {
     let writer = &mut *(opaque as *mut MemoryWriter);
     let slice = std::slice::from_raw_parts(buf, buf_size as usize);
-    eprintln!("write_packet: size={} opaque={:p}", buf_size, opaque);
     match writer.write(slice) {
         Ok(n) => n as i32,
         Err(_) => -1,
@@ -111,12 +104,11 @@ unsafe extern "C" fn write_packet(opaque: *mut c_void, buf: *const u8, buf_size:
 unsafe extern "C" fn seek_packet(opaque: *mut c_void, offset: i64, whence: i32) -> i64 {
     let writer = &mut *(opaque as *mut MemoryWriter);
 
-    // Handle AVSEEK_SIZE
+    // AVSEEK_SIZE: return total buffer size
     if whence == 0x10000 {
-        return writer.buffer.lock().unwrap().len() as i64;
+        return writer.buffer.len() as i64;
     }
 
-    eprintln!("seek_packet: offset={} whence={}", offset, whence);
     let seek_from = match whence {
         0 => SeekFrom::Start(offset as u64),
         1 => SeekFrom::Current(offset),

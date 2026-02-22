@@ -184,8 +184,10 @@ pub async fn init_segment(
         return Ok((headers, data).into_response());
     }
 
-    // Generate init segment
-    let data = generate_init_segment(&index)
+    // Generate init segment (blocking FFmpeg call — run on blocking thread pool)
+    let data = tokio::task::spawn_blocking(move || generate_init_segment(&index))
+        .await
+        .map_err(|e| HttpError::InternalError(e.to_string()))?
         .map_err(|e| HttpError::InternalError(format!("Failed to generate init segment: {}", e)))?;
 
     // Cache the result
@@ -223,9 +225,12 @@ pub async fn video_init_segment(
     }
 
     // Generate video-only init segment
-    let data = crate::segment::generate_video_init_segment(&index).map_err(|e| {
-        HttpError::InternalError(format!("Failed to generate video init segment: {}", e))
-    })?;
+    let data = tokio::task::spawn_blocking(move || {
+        crate::segment::generate_video_init_segment(&index)
+    })
+    .await
+    .map_err(|e| HttpError::InternalError(e.to_string()))?
+    .map_err(|e| HttpError::InternalError(format!("Failed to generate video init segment: {}", e)))?;
 
     // Cache the result
     state
@@ -266,11 +271,13 @@ pub async fn audio_init_segment(
         return Ok((headers, data).into_response());
     }
 
-    // Generate audio-only init segment for this track
-    let data = crate::segment::generate_audio_init_segment(&index, track_index, force_aac)
-        .map_err(|e| {
-            HttpError::InternalError(format!("Failed to generate audio init segment: {}", e))
-        })?;
+    // Generate audio-only init segment (blocking FFmpeg call — run on blocking thread pool)
+    let data = tokio::task::spawn_blocking(move || {
+        crate::segment::generate_audio_init_segment(&index, track_index, force_aac)
+    })
+    .await
+    .map_err(|e| HttpError::InternalError(e.to_string()))?
+    .map_err(|e| HttpError::InternalError(format!("Failed to generate audio init segment: {}", e)))?;
 
     // Cache the result
     state
@@ -307,12 +314,13 @@ pub async fn video_segment(
 
     let index = state.get_stream_or_error(&stream_id)?;
 
-    // Generate video segment
-    let data =
+    // Generate video segment (blocking FFmpeg call — run on blocking thread pool)
+    let data = tokio::task::spawn_blocking(move || {
         crate::segment::generate_video_segment(&index, track_index, sequence, &index.source_path)
-            .map_err(|e| {
-            HttpError::InternalError(format!("Failed to generate video segment: {}", e))
-        })?;
+    })
+    .await
+    .map_err(|e| HttpError::InternalError(e.to_string()))?
+    .map_err(|e| HttpError::InternalError(format!("Failed to generate video segment: {}", e)))?;
 
     // Cache the result
     state
@@ -353,14 +361,12 @@ pub async fn audio_segment(
 
     let index = state.get_stream_or_error(&stream_id)?;
 
-    // Generate audio segment
-    let data = crate::segment::generate_audio_segment(
-        &index,
-        track_index,
-        sequence,
-        &index.source_path,
-        force_aac,
-    )
+    // Generate audio segment (blocking FFmpeg call — run on blocking thread pool)
+    let data = tokio::task::spawn_blocking(move || {
+        crate::segment::generate_audio_segment(&index, track_index, sequence, &index.source_path, force_aac)
+    })
+    .await
+    .map_err(|e| HttpError::InternalError(e.to_string()))?
     .map_err(|e| HttpError::InternalError(format!("Failed to generate audio segment: {}", e)))?;
 
     // Cache the result
@@ -401,14 +407,12 @@ pub async fn subtitle_segment(
 
     let index = state.get_stream_or_error(&stream_id)?;
 
-    // Generate subtitle segment
-    let data = crate::segment::generate_subtitle_segment(
-        &index,
-        track_index,
-        start_seq,
-        end_seq,
-        &index.source_path,
-    )
+    // Generate subtitle segment (blocking FFmpeg call — run on blocking thread pool)
+    let data = tokio::task::spawn_blocking(move || {
+        crate::segment::generate_subtitle_segment(&index, track_index, start_seq, end_seq, &index.source_path)
+    })
+    .await
+    .map_err(|e| HttpError::InternalError(e.to_string()))?
     .map_err(|e| HttpError::InternalError(format!("Failed to generate subtitle segment: {}", e)))?;
 
     // Cache the result
