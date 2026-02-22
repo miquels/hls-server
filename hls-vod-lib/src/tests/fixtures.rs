@@ -280,13 +280,16 @@ impl TestMediaInfo {
             });
         }
 
-        crate::api::MediaInfo {
-            file_size: 1_000_000,              // 10MB mock, changed to 1MB as per edit
-            duration_secs: self.duration_secs, // Changed from self.duration to self.duration_secs
-            video_timebase: crate::ffmpeg_utils::ffmpeg::Rational::new(1, 90000), // Changed from Rational to crate::ffmpeg_utils::ffmpeg::Rational
+        let media = crate::api::MediaInfo {
+            file_size: 1_000_000,
+            duration_secs: self.duration_secs,
+            video_timebase: crate::ffmpeg_utils::ffmpeg::Rational::new(1, 90000),
             tracks,
             index,
-        }
+            cache_enabled: true,
+        };
+        crate::api::register_test_stream(std::sync::Arc::new(media.clone()));
+        media
     }
 }
 

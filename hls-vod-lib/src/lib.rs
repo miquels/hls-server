@@ -23,6 +23,7 @@
 
 pub(crate) mod api;
 pub(crate) mod audio_plan;
+pub(crate) mod cache;
 pub(crate) mod error;
 pub(crate) mod ffmpeg_utils;
 pub(crate) mod index;

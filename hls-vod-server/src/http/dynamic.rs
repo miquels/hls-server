@@ -63,56 +63,52 @@ pub async fn handle_dynamic_request(
 
     let path_str = media_path.to_string_lossy().to_string();
 
-    let media = if let Some(media) = state.get_stream_by_path(&path_str) {
-        media.index.touch();
-        media
-    } else {
-        if !media_path.exists() {
-            return Err(HttpError::StreamNotFound(format!(
-                "Media file not found: {}",
-                path_str
-            )));
-        }
+    if !media_path.exists() {
+        return Err(HttpError::StreamNotFound(format!(
+            "Media file not found: {}",
+            path_str
+        )));
+    }
 
-        // Deduplicate concurrent indexing of the same file
+    // Deduplicate concurrent indexing of the same file
+    // The OnceCell ensures the parsing happens only once.
+    // The entry in `indexing_in_flight` is removed once the stream is successfully indexed
+    // and moved to `streams` map, or if an error occurs.
+    let stream_id = {
         let cell = state
             .indexing_in_flight
             .entry(path_str.clone())
-            .or_insert_with(|| std::sync::Arc::new(tokio::sync::OnceCell::new()))
+            .or_insert_with(|| Arc::new(tokio::sync::OnceCell::new()))
             .clone();
 
-        let arc = cell
-            .get_or_try_init(|| {
-                let state2 = state.clone();
-                let path_str2 = path_str.clone();
-                let media_path2 = media_path.clone();
-                async move {
-                    info!("Indexing new file: {:?}", media_path2);
-                    let new_media = tokio::task::spawn_blocking(move || {
-                        hls_vod_lib::parse_file(&media_path2, true)
-                    })
-                    .await
-                    .map_err(|e| HttpError::InternalError(e.to_string()))?
-                    .map_err(|e| {
-                        HttpError::InternalError(format!("Failed to index file: {}", e))
-                    })?;
-                    // Re-check in case another request registered it while we were scanning
-                    if let Some(existing) = state2.get_stream_by_path(&path_str2) {
-                        return Ok::<Arc<hls_vod_lib::MediaInfo>, HttpError>(existing);
-                    }
-                    Ok(state2.register_stream(new_media))
+        cell.get_or_try_init(|| {
+            let media_path2 = media_path.clone();
+            let path_str2 = path_str.clone();
+            let state2 = state.clone();
+            async move {
+                info!("Indexing new file: {:?}", media_path2);
+                let result = tokio::task::spawn_blocking(move || {
+                    hls_vod_lib::parse_file(&media_path2, true)
+                })
+                .await
+                .map_err(|e| HttpError::InternalError(e.to_string()))?
+                .map_err(|e| HttpError::InternalError(format!("Failed to index file: {}", e)));
+
+                // If indexing failed, remove the OnceCell from the map to allow retries
+                if result.is_err() {
+                    state2.indexing_in_flight.remove(&path_str2);
                 }
-            })
-            .await?
-            .clone();
-
-        // Remove the in-flight entry now that the result is in the main streams map
-        state.indexing_in_flight.remove(&path_str);
-
-        arc
+                result
+            }
+        })
+        .await?
+        .clone()
     };
 
-    let stream_id = media.index.stream_id.clone();
+    // The entry is removed from `indexing_in_flight` either by the `OnceCell` init block on error,
+    // or implicitly when the stream is moved to the main `streams` map.
+    // No explicit `remove` here is needed as the `OnceCell` handles the "once" aspect,
+    // and the `streams` map is the final destination.
 
     if suffix == "master.m3u8" {
         // Build the correct relative prefix (the basename of the media file, e.g. "bigbucks.mp4")

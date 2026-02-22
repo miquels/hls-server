@@ -2,35 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Cache configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CacheConfig {
-    /// Maximum memory usage for segment cache in megabytes
-    pub max_memory_mb: usize,
-
-    /// Maximum number of segments to cache
-    pub max_segments: usize,
-
-    /// Time-to-live for cached segments in seconds
-    pub ttl_secs: u64,
-}
-
-impl Default for CacheConfig {
-    fn default() -> Self {
-        Self {
-            max_memory_mb: 512,
-            max_segments: 100, // ~400 seconds of content at 4s/segment
-            ttl_secs: 300,     // 5 minutes
-        }
-    }
-}
-
-impl CacheConfig {
-    /// Get maximum memory in bytes
-    pub fn max_memory_bytes(&self) -> usize {
-        self.max_memory_mb * 1024 * 1024
-    }
-}
+pub use hls_vod_lib::CacheConfig;
 
 /// Segment configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -8,7 +8,6 @@
 //! - HTTP headers (Content-Type, Cache-Control)
 //! - CORS middleware
 
-pub mod cache;
 pub mod dynamic;
 pub mod handlers;
 pub mod middleware;

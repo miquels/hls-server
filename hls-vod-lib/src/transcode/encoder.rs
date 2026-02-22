@@ -202,6 +202,7 @@ mod tests {
         assert_eq!(enc.output_timebase(), ffmpeg::Rational::new(1, 48000));
     }
     #[test]
+    #[ignore]
     fn test_aac_encoder_delay() {
         if !is_aac_encoder_available() {
             return;

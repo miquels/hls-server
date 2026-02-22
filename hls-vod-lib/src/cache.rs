@@ -1,14 +1,72 @@
-//! LRU Segment Cache
+//! LRU Segment Cache and Deduplication
 //!
 //! Implements a least-recently-used cache for HLS segments
-//! with memory limit enforcement.
+//! with memory limit enforcement, and deduplicates concurrent
+//! segment requests.
 
 use bytes::Bytes;
 use dashmap::DashMap;
+use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::OnceLock;
 use std::time::SystemTime;
 
-use crate::config::CacheConfig;
+static CACHE: OnceLock<SegmentCache> = OnceLock::new();
+
+/// Initialize the global segment cache.
+/// This function should be called once at application startup.
+pub fn init_cache(config: CacheConfig) {
+    let _ = CACHE.set(SegmentCache::new(config));
+}
+
+/// Retrieve the global cache stats
+pub fn cache_stats() -> CacheStats {
+    if let Some(c) = CACHE.get() {
+        c.stats()
+    } else {
+        CacheStats {
+            entry_count: 0,
+            total_size_bytes: 0,
+            memory_limit_bytes: 0,
+            oldest_entry_age_secs: 0,
+        }
+    }
+}
+
+/// Access the global cache internal instance
+pub(crate) fn global_cache() -> Option<&'static SegmentCache> {
+    CACHE.get()
+}
+
+/// Cache configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CacheConfig {
+    /// Maximum memory usage for segment cache in megabytes
+    pub max_memory_mb: usize,
+
+    /// Maximum number of segments to cache
+    pub max_segments: usize,
+
+    /// Time-to-live for cached segments in seconds
+    pub ttl_secs: u64,
+}
+
+impl Default for CacheConfig {
+    fn default() -> Self {
+        Self {
+            max_memory_mb: 512,
+            max_segments: 100, // ~400 seconds of content at 4s/segment
+            ttl_secs: 300,     // 5 minutes
+        }
+    }
+}
+
+impl CacheConfig {
+    /// Get maximum memory in bytes
+    pub fn max_memory_bytes(&self) -> usize {
+        self.max_memory_mb * 1024 * 1024
+    }
+}
 
 /// Cache entry with metadata
 #[derive(Debug, Clone)]
@@ -70,18 +128,26 @@ impl SegmentCache {
     }
 
     /// Get a cached segment
-    pub fn get(&self, stream_id: &str, segment_type: &str, sequence: usize) -> Option<Bytes> {
+    pub fn get(
+        &self,
+        stream_id: &str,
+        segment_type: &str,
+        sequence: usize,
+        touch: bool,
+    ) -> Option<Bytes> {
         let key = Self::make_key(stream_id, segment_type, sequence);
 
         if let Some(mut entry) = self.entries.get_mut(&key) {
-            entry.touch();
+            if touch {
+                entry.touch();
+            }
             Some(entry.data.clone())
         } else {
             None
         }
     }
 
-    /// Check if a segment is cached
+    #[allow(dead_code)]
     pub fn contains(&self, stream_id: &str, segment_type: &str, sequence: usize) -> bool {
         let key = Self::make_key(stream_id, segment_type, sequence);
         self.entries.contains_key(&key)
@@ -109,16 +175,6 @@ impl SegmentCache {
     }
 
     /// Evict entries if needed to make room for new data.
-    ///
-    /// Two-phase eviction:
-    /// 1. Remove all expired entries in a single `retain` pass.
-    /// 2. If still over budget, collect (last_accessed, key, size) tuples,
-    ///    sort only those (not the whole map), and remove the oldest until
-    ///    we've freed enough.  Avoids holding DashMap shard locks during sort.
-    ///
-    /// `memory_bytes` is recomputed from the live entries after eviction to
-    /// prevent the counter from drifting due to concurrent inserts/removes
-    /// between the `retain` and the `fetch_sub` (#8 fix).
     fn evict_if_needed(&self, needed_size: usize) {
         let target = self.config.max_memory_bytes() / 2;
 
@@ -126,20 +182,24 @@ impl SegmentCache {
         self.entries
             .retain(|_, entry| !entry.is_expired(self.config.ttl_secs));
 
-        // Recompute true memory usage to avoid underflow drift (#8)
+        // Recompute true memory usage
         let true_usage: usize = self.entries.iter().map(|e| e.value().data.len()).sum();
         self.memory_bytes.store(true_usage, Ordering::Relaxed);
 
         // Phase 2: LRU eviction if still over budget
         if true_usage + needed_size > self.config.max_memory_bytes() {
-            // Collect only the metadata needed for sorting — no data clones
             let mut candidates: Vec<(SystemTime, String, usize)> = self
                 .entries
                 .iter()
-                .map(|e| (e.value().last_accessed, e.key().clone(), e.value().data.len()))
+                .map(|e| {
+                    (
+                        e.value().last_accessed,
+                        e.key().clone(),
+                        e.value().data.len(),
+                    )
+                })
                 .collect();
 
-            // Sort by last_accessed ascending (oldest first)
             candidates.sort_unstable_by_key(|(t, _, _)| *t);
 
             let mut freed = 0usize;
@@ -152,24 +212,29 @@ impl SegmentCache {
                 }
             }
 
-            // Recompute again after LRU removal
             let after: usize = self.entries.iter().map(|e| e.value().data.len()).sum();
             self.memory_bytes.store(after, Ordering::Relaxed);
         }
     }
 
-    /// Remove all cache entries for a stream
-    pub fn remove_stream(&self, stream_id: &str) {
-        self.entries.retain(|key, _| !key.starts_with(stream_id));
-        // Recompute to avoid underflow drift
-        let usage: usize = self.entries.iter().map(|e| e.value().data.len()).sum();
-        self.memory_bytes.store(usage, Ordering::Relaxed);
+    /// Clear stream cache
+    #[allow(dead_code)]
+    pub fn len(&self) -> usize {
+        self.entries.len()
     }
 
-    /// Clear all expired entries
-    pub fn clear_expired(&self) {
-        self.entries
-            .retain(|_, entry| !entry.is_expired(self.config.ttl_secs));
+    #[allow(dead_code)]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    #[allow(dead_code)]
+    pub fn memory_usage(&self) -> usize {
+        self.memory_bytes.load(Ordering::Relaxed)
+    }
+
+    pub fn remove_stream(&self, stream_id: &str) {
+        self.entries.retain(|key, _| !key.starts_with(stream_id));
         let usage: usize = self.entries.iter().map(|e| e.value().data.len()).sum();
         self.memory_bytes.store(usage, Ordering::Relaxed);
     }
@@ -196,21 +261,6 @@ impl SegmentCache {
             oldest_entry_age_secs: oldest_age,
         }
     }
-
-    /// Get the number of cached entries
-    pub fn len(&self) -> usize {
-        self.entries.len()
-    }
-
-    /// Check if cache is empty
-    pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
-    }
-
-    /// Get current memory usage in bytes
-    pub fn memory_usage(&self) -> usize {
-        self.memory_bytes.load(Ordering::Relaxed)
-    }
 }
 
 /// Cache statistics
@@ -231,6 +281,7 @@ impl Default for SegmentCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::Bytes;
     use std::time::Duration;
 
     #[test]
@@ -262,7 +313,7 @@ mod tests {
         cache.insert("stream1", "video", 0, data.clone());
 
         assert!(cache.contains("stream1", "video", 0));
-        assert_eq!(cache.get("stream1", "video", 0), Some(data));
+        assert_eq!(cache.get("stream1", "video", 0, true), Some(data));
     }
 
     #[test]
@@ -270,7 +321,7 @@ mod tests {
         let cache = SegmentCache::new(CacheConfig::default());
 
         assert!(!cache.contains("stream1", "video", 0));
-        assert_eq!(cache.get("stream1", "video", 0), None);
+        assert_eq!(cache.get("stream1", "video", 0, true), None);
     }
 
     #[test]

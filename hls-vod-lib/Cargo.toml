@@ -17,6 +17,8 @@ uuid = { version = "1.6", features = ["v4", "fast-rng"] }
 toml = "0.8"
 chrono = "0.4"
 mp4 = "0.14.0"
+dashmap = "5.5"
+tokio = { version = "1.37", features = ["sync"] }
 
 [dev-dependencies]
 tempfile = "3.9"

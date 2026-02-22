@@ -214,7 +214,9 @@ mod tests {
             return;
         }
 
-        let media = crate::api::parse_file(&asset_path, true).expect("Failed to scan test asset");
+        let stream_id =
+            crate::api::parse_file(&asset_path, true).expect("Failed to scan test asset");
+        let media = crate::api::get_stream_by_id(&stream_id).unwrap();
         let index = &media.index;
 
         if index.segments.len() < 2 {
@@ -266,7 +268,9 @@ mod tests {
             return;
         }
 
-        let media = crate::api::parse_file(&asset_path, true).expect("Failed to scan test asset");
+        let stream_id =
+            crate::api::parse_file(&asset_path, true).expect("Failed to scan test asset");
+        let media = crate::api::get_stream_by_id(&stream_id).unwrap();
         let index = &media.index;
         let audio_stream = index.audio_streams.first().expect("No audio stream found");
 
