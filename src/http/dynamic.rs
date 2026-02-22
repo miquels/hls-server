@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use super::handlers::HttpError;
 use crate::index::scanner::scan_file;
-use crate::state::AppState;
+use crate::state::{AppState, StreamIndex};
 use tracing::info;
 
 /// Parse a dynamic path into a media file path and a suffix
@@ -66,8 +66,6 @@ pub async fn handle_dynamic_request(
         ))
     })?;
 
-    state.cleanup_expired_streams();
-
     let path_str = media_path.to_string_lossy().to_string();
 
     let index = if let Some(index) = state.get_stream_by_path(&path_str) {
@@ -80,12 +78,43 @@ pub async fn handle_dynamic_request(
                 path_str
             )));
         }
-        info!("Indexing new file: {:?}", media_path);
-        let new_index = tokio::task::spawn_blocking(move || scan_file(&media_path))
-            .await
-            .map_err(|e| HttpError::InternalError(e.to_string()))?
-            .map_err(|e| HttpError::InternalError(format!("Failed to index file: {}", e)))?;
-        state.register_stream(new_index)
+
+        // Deduplicate concurrent indexing of the same file: all requests that
+        // arrive while scan_file is running share one OnceCell and wait for the
+        // first caller to populate it.
+        let cell = state
+            .indexing_in_flight
+            .entry(path_str.clone())
+            .or_insert_with(|| std::sync::Arc::new(tokio::sync::OnceCell::new()))
+            .clone();
+
+        let arc = cell
+            .get_or_try_init(|| {
+                let state2 = state.clone();
+                let path_str2 = path_str.clone();
+                let media_path2 = media_path.clone();
+                async move {
+                    info!("Indexing new file: {:?}", media_path2);
+                    let new_index = tokio::task::spawn_blocking(move || scan_file(&media_path2))
+                        .await
+                        .map_err(|e| HttpError::InternalError(e.to_string()))?
+                        .map_err(|e| {
+                            HttpError::InternalError(format!("Failed to index file: {}", e))
+                        })?;
+                    // Re-check in case another request registered it while we were scanning
+                    if let Some(existing) = state2.get_stream_by_path(&path_str2) {
+                        return Ok::<Arc<StreamIndex>, HttpError>(existing);
+                    }
+                    Ok(state2.register_stream(new_index))
+                }
+            })
+            .await?
+            .clone();
+
+        // Remove the in-flight entry now that the result is in the main streams map
+        state.indexing_in_flight.remove(&path_str);
+
+        arc
     };
 
     let stream_id = index.stream_id.clone();

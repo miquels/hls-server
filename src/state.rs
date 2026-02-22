@@ -314,6 +314,15 @@ pub struct AppState {
     /// Path-to-stream lookup for deduplication
     pub path_to_stream: DashMap<String, String>,
 
+    /// In-flight indexing: path -> shared cell that resolves to the indexed stream.
+    /// Concurrent requests for the same unindexed file wait on the same cell instead
+    /// of each launching their own scan_file call.
+    pub indexing_in_flight: DashMap<String, Arc<tokio::sync::OnceCell<Arc<StreamIndex>>>>,
+
+    /// In-flight segment generation: cache_key -> shared cell that resolves to the segment bytes.
+    /// Concurrent requests for the same uncached segment wait for the first to finish.
+    pub segments_in_flight: DashMap<String, Arc<tokio::sync::OnceCell<bytes::Bytes>>>,
+
     /// Segment cache (stream_id:segment_type:sequence -> CacheEntry)
     pub segment_cache: crate::http::cache::SegmentCache,
 
@@ -333,6 +342,8 @@ impl AppState {
         Self {
             streams: DashMap::new(),
             path_to_stream: DashMap::new(),
+            indexing_in_flight: DashMap::new(),
+            segments_in_flight: DashMap::new(),
             segment_cache: crate::http::cache::SegmentCache::new(config.cache.clone()),
             audio_encoders: dashmap::DashMap::new(),
             shutdown: AtomicBool::new(false),
@@ -372,21 +383,55 @@ impl AppState {
 
     /// Remove a stream
     pub fn remove_stream(&self, stream_id: &str) -> Option<Arc<StreamIndex>> {
-        // Remove from path lookup
-        if let Some(index) = self.streams.remove(stream_id) {
-            let (_, arc) = index;
-            if let Some(path) = self
-                .path_to_stream
-                .iter()
-                .find(|r| r.value() == stream_id)
-                .map(|r| r.key().clone())
-            {
-                self.path_to_stream.remove(&path);
-            }
+        if let Some((_, arc)) = self.streams.remove(stream_id) {
+            let path = arc.source_path.to_string_lossy();
+            self.path_to_stream.remove(path.as_ref());
             Some(arc)
         } else {
             None
         }
+    }
+
+    /// Get a cached segment or generate it exactly once even under concurrent requests.
+    ///
+    /// If the segment is already cached, returns it immediately.  Otherwise, all
+    /// concurrent callers for the same key share a single `OnceCell`; only the
+    /// first caller runs `generate`, the rest wait and reuse the result.
+    pub async fn get_or_generate_segment<F, Fut>(
+        &self,
+        stream_id: &str,
+        segment_type: &str,
+        sequence: usize,
+        generate: F,
+    ) -> crate::error::Result<Bytes>
+    where
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = crate::error::Result<Bytes>> + Send + 'static,
+    {
+        let cache_key = crate::http::cache::SegmentCache::make_key(stream_id, segment_type, sequence);
+
+        // Fast path: already cached
+        if let Some(data) = self.segment_cache.get(stream_id, segment_type, sequence) {
+            return Ok(data);
+        }
+
+        // Slow path: get-or-create an in-flight cell for this key
+        let cell = self
+            .segments_in_flight
+            .entry(cache_key.clone())
+            .or_insert_with(|| std::sync::Arc::new(tokio::sync::OnceCell::new()))
+            .clone();
+
+        let data = cell
+            .get_or_try_init(|| async move { generate().await })
+            .await?
+            .clone();
+
+        // Populate the persistent cache and drop the in-flight entry
+        self.segment_cache.insert(stream_id, segment_type, sequence, data.clone());
+        self.segments_in_flight.remove(&cache_key);
+
+        Ok(data)
     }
 
     /// Cache a segment

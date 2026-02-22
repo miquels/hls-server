@@ -300,32 +300,19 @@ pub async fn video_segment(
     State(state): State<Arc<AppState>>,
     Path((stream_id, track_index, sequence)): Path<(String, usize, usize)>,
 ) -> Result<Response, HttpError> {
-    // Check cache first
     let cache_key = format!("video_{}", track_index);
-    if let Some(data) = state.segment_cache.get(&stream_id, &cache_key, sequence) {
-        let mut headers = HeaderMap::new();
-        headers.insert("Content-Type", HeaderValue::from_static("video/mp4"));
-        headers.insert(
-            "Cache-Control",
-            HeaderValue::from_static("public, max-age=31536000"),
-        );
-        return Ok((headers, data).into_response());
-    }
-
     let index = state.get_stream_or_error(&stream_id)?;
 
-    // Generate video segment (blocking FFmpeg call — run on blocking thread pool)
-    let data = tokio::task::spawn_blocking(move || {
-        crate::segment::generate_video_segment(&index, track_index, sequence, &index.source_path)
-    })
-    .await
-    .map_err(|e| HttpError::InternalError(e.to_string()))?
-    .map_err(|e| HttpError::InternalError(format!("Failed to generate video segment: {}", e)))?;
-
-    // Cache the result
-    state
-        .segment_cache
-        .insert(&stream_id, &cache_key, sequence, data.clone());
+    let data = state
+        .get_or_generate_segment(&stream_id, &cache_key, sequence, move || async move {
+            tokio::task::spawn_blocking(move || {
+                crate::segment::generate_video_segment(&index, track_index, sequence, &index.source_path)
+            })
+            .await
+            .map_err(|e| crate::error::HlsError::Muxing(e.to_string()))?
+        })
+        .await
+        .map_err(|e| HttpError::InternalError(format!("Failed to generate video segment: {}", e)))?;
 
     let mut headers = HeaderMap::new();
     headers.insert("Content-Type", HeaderValue::from_static("video/mp4"));
@@ -333,7 +320,6 @@ pub async fn video_segment(
         "Cache-Control",
         HeaderValue::from_static("public, max-age=31536000"),
     );
-
     Ok((headers, data).into_response())
 }
 
@@ -343,36 +329,23 @@ pub async fn audio_segment(
     State(state): State<Arc<AppState>>,
     Path((stream_id, track_index, sequence, force_aac)): Path<(String, usize, usize, bool)>,
 ) -> Result<Response, HttpError> {
-    // Check cache first
     let segment_type = if force_aac {
         format!("audio_{}-aac", track_index)
     } else {
         format!("audio_{}", track_index)
     };
-    if let Some(data) = state.segment_cache.get(&stream_id, &segment_type, sequence) {
-        let mut headers = HeaderMap::new();
-        headers.insert("Content-Type", HeaderValue::from_static("audio/mp4"));
-        headers.insert(
-            "Cache-Control",
-            HeaderValue::from_static("public, max-age=31536000"),
-        );
-        return Ok((headers, data).into_response());
-    }
-
     let index = state.get_stream_or_error(&stream_id)?;
 
-    // Generate audio segment (blocking FFmpeg call — run on blocking thread pool)
-    let data = tokio::task::spawn_blocking(move || {
-        crate::segment::generate_audio_segment(&index, track_index, sequence, &index.source_path, force_aac)
-    })
-    .await
-    .map_err(|e| HttpError::InternalError(e.to_string()))?
-    .map_err(|e| HttpError::InternalError(format!("Failed to generate audio segment: {}", e)))?;
-
-    // Cache the result
-    state
-        .segment_cache
-        .insert(&stream_id, &segment_type, sequence, data.clone());
+    let data = state
+        .get_or_generate_segment(&stream_id, &segment_type, sequence, move || async move {
+            tokio::task::spawn_blocking(move || {
+                crate::segment::generate_audio_segment(&index, track_index, sequence, &index.source_path, force_aac)
+            })
+            .await
+            .map_err(|e| crate::error::HlsError::Muxing(e.to_string()))?
+        })
+        .await
+        .map_err(|e| HttpError::InternalError(format!("Failed to generate audio segment: {}", e)))?;
 
     let mut headers = HeaderMap::new();
     headers.insert("Content-Type", HeaderValue::from_static("audio/mp4"));
@@ -380,7 +353,6 @@ pub async fn audio_segment(
         "Cache-Control",
         HeaderValue::from_static("public, max-age=31536000"),
     );
-
     Ok((headers, data).into_response())
 }
 
@@ -390,35 +362,19 @@ pub async fn subtitle_segment(
     State(state): State<Arc<AppState>>,
     Path((stream_id, track_index, start_seq, end_seq)): Path<(String, usize, usize, usize)>,
 ) -> Result<Response, HttpError> {
-    // Check cache first
     let segment_type = format!("sub_{}_{}", track_index, end_seq);
-    if let Some(data) = state
-        .segment_cache
-        .get(&stream_id, &segment_type, start_seq)
-    {
-        let mut headers = HeaderMap::new();
-        headers.insert("Content-Type", HeaderValue::from_static("text/vtt"));
-        headers.insert(
-            "Cache-Control",
-            HeaderValue::from_static("public, max-age=31536000"),
-        );
-        return Ok((headers, data).into_response());
-    }
-
     let index = state.get_stream_or_error(&stream_id)?;
 
-    // Generate subtitle segment (blocking FFmpeg call — run on blocking thread pool)
-    let data = tokio::task::spawn_blocking(move || {
-        crate::segment::generate_subtitle_segment(&index, track_index, start_seq, end_seq, &index.source_path)
-    })
-    .await
-    .map_err(|e| HttpError::InternalError(e.to_string()))?
-    .map_err(|e| HttpError::InternalError(format!("Failed to generate subtitle segment: {}", e)))?;
-
-    // Cache the result
-    state
-        .segment_cache
-        .insert(&stream_id, &segment_type, start_seq, data.clone());
+    let data = state
+        .get_or_generate_segment(&stream_id, &segment_type, start_seq, move || async move {
+            tokio::task::spawn_blocking(move || {
+                crate::segment::generate_subtitle_segment(&index, track_index, start_seq, end_seq, &index.source_path)
+            })
+            .await
+            .map_err(|e| crate::error::HlsError::Muxing(e.to_string()))?
+        })
+        .await
+        .map_err(|e| HttpError::InternalError(format!("Failed to generate subtitle segment: {}", e)))?;
 
     let mut headers = HeaderMap::new();
     headers.insert("Content-Type", HeaderValue::from_static("text/vtt"));
@@ -426,7 +382,6 @@ pub async fn subtitle_segment(
         "Cache-Control",
         HeaderValue::from_static("public, max-age=31536000"),
     );
-
     Ok((headers, data).into_response())
 }
 

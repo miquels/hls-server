@@ -108,75 +108,70 @@ impl SegmentCache {
         self.memory_bytes.fetch_add(size, Ordering::Relaxed);
     }
 
-    /// Evict entries if needed to make room for new data
+    /// Evict entries if needed to make room for new data.
+    ///
+    /// Two-phase eviction:
+    /// 1. Remove all expired entries in a single `retain` pass.
+    /// 2. If still over budget, collect (last_accessed, key, size) tuples,
+    ///    sort only those (not the whole map), and remove the oldest until
+    ///    we've freed enough.  Avoids holding DashMap shard locks during sort.
+    ///
+    /// `memory_bytes` is recomputed from the live entries after eviction to
+    /// prevent the counter from drifting due to concurrent inserts/removes
+    /// between the `retain` and the `fetch_sub` (#8 fix).
     fn evict_if_needed(&self, needed_size: usize) {
-        let mut freed = 0;
         let target = self.config.max_memory_bytes() / 2;
 
-        // First, remove expired entries
-        self.entries.retain(|_, entry| {
-            if entry.is_expired(self.config.ttl_secs) {
-                freed += entry.data.len();
-                false
-            } else {
-                true
-            }
-        });
-        self.memory_bytes.fetch_sub(freed, Ordering::Relaxed);
+        // Phase 1: drop expired entries
+        self.entries
+            .retain(|_, entry| !entry.is_expired(self.config.ttl_secs));
 
-        // If still need space, remove by LRU
-        if self.memory_bytes.load(Ordering::Relaxed) + needed_size > self.config.max_memory_bytes()
-        {
-            // Collect entries sorted by last_accessed
-            let mut entries: Vec<_> = self.entries.iter().collect();
-            entries.sort_by_key(|e| e.value().last_accessed);
+        // Recompute true memory usage to avoid underflow drift (#8)
+        let true_usage: usize = self.entries.iter().map(|e| e.value().data.len()).sum();
+        self.memory_bytes.store(true_usage, Ordering::Relaxed);
 
-            let mut to_remove = Vec::new();
-            freed = 0;
+        // Phase 2: LRU eviction if still over budget
+        if true_usage + needed_size > self.config.max_memory_bytes() {
+            // Collect only the metadata needed for sorting — no data clones
+            let mut candidates: Vec<(SystemTime, String, usize)> = self
+                .entries
+                .iter()
+                .map(|e| (e.value().last_accessed, e.key().clone(), e.value().data.len()))
+                .collect();
 
-            for entry in entries {
+            // Sort by last_accessed ascending (oldest first)
+            candidates.sort_unstable_by_key(|(t, _, _)| *t);
+
+            let mut freed = 0usize;
+            for (_, key, size) in candidates {
                 if freed >= target {
                     break;
                 }
-                to_remove.push(entry.key().clone());
-                freed += entry.value().data.len();
-            }
-
-            for key in to_remove {
-                if let Some((_, entry)) = self.entries.remove(&key) {
-                    self.memory_bytes
-                        .fetch_sub(entry.data.len(), Ordering::Relaxed);
+                if self.entries.remove(&key).is_some() {
+                    freed += size;
                 }
             }
+
+            // Recompute again after LRU removal
+            let after: usize = self.entries.iter().map(|e| e.value().data.len()).sum();
+            self.memory_bytes.store(after, Ordering::Relaxed);
         }
     }
 
     /// Remove all cache entries for a stream
     pub fn remove_stream(&self, stream_id: &str) {
-        let mut freed = 0;
-        self.entries.retain(|key, entry| {
-            if key.starts_with(stream_id) {
-                freed += entry.data.len();
-                false
-            } else {
-                true
-            }
-        });
-        self.memory_bytes.fetch_sub(freed, Ordering::Relaxed);
+        self.entries.retain(|key, _| !key.starts_with(stream_id));
+        // Recompute to avoid underflow drift
+        let usage: usize = self.entries.iter().map(|e| e.value().data.len()).sum();
+        self.memory_bytes.store(usage, Ordering::Relaxed);
     }
 
     /// Clear all expired entries
     pub fn clear_expired(&self) {
-        let mut freed = 0;
-        self.entries.retain(|_, entry| {
-            if entry.is_expired(self.config.ttl_secs) {
-                freed += entry.data.len();
-                false
-            } else {
-                true
-            }
-        });
-        self.memory_bytes.fetch_sub(freed, Ordering::Relaxed);
+        self.entries
+            .retain(|_, entry| !entry.is_expired(self.config.ttl_secs));
+        let usage: usize = self.entries.iter().map(|e| e.value().data.len()).sum();
+        self.memory_bytes.store(usage, Ordering::Relaxed);
     }
 
     /// Get cache statistics

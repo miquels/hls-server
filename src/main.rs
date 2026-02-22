@@ -75,6 +75,24 @@ async fn main() -> Result<()> {
     // Create application state
     let state = Arc::new(AppState::new(config.clone()));
 
+    // Background task: evict expired streams every 60 seconds.
+    // Replaces the per-request cleanup_expired_streams() call which held
+    // DashMap shard locks on every request.
+    {
+        let state_bg = Arc::clone(&state);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                interval.tick().await;
+                let removed = state_bg.cleanup_expired_streams();
+                if removed > 0 {
+                    tracing::info!("Evicted {} expired stream(s)", removed);
+                }
+            }
+        });
+    }
+
     // Build router
     let app = create_router(state.clone());
 
