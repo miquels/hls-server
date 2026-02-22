@@ -80,6 +80,7 @@ pub fn read_index_entries(stream: &ffmpeg::Stream) -> Vec<IndexEntry> {
 ///
 /// # Safety
 /// `ctx_ptr` must be a valid, non-null `*mut AVFormatContext`.
+#[allow(dead_code)] // we'll need this later
 pub fn seek_to_byte_offset(
     input: &mut ffmpeg::format::context::Input,
     stream_index: i32,
@@ -92,14 +93,17 @@ pub fn seek_to_byte_offset(
         ffmpeg::ffi::avformat_seek_file(
             input.as_mut_ptr(),
             stream_index,
-            pos,       // min_ts
-            pos,       // target_ts
-            pos,       // max_ts
+            pos, // min_ts
+            pos, // target_ts
+            pos, // max_ts
             AVSEEK_FLAG_BYTE,
         )
     };
     if ret < 0 {
-        Err(format!("avformat_seek_file(byte={}) returned {}", byte_offset, ret))
+        Err(format!(
+            "avformat_seek_file(byte={}) returned {}",
+            byte_offset, ret
+        ))
     } else {
         Ok(())
     }

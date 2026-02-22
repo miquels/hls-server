@@ -5,10 +5,9 @@
 use crate::ffmpeg_utils::ffmpeg;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicI64, AtomicU64};
-use std::sync::Arc;
-
-use crate::api::MediaInfo;
-use crate::ffmpeg_utils::ffmpeg::Rational;
+// use std::sync::Arc; // Commented out as per instruction
+// use crate::api::MediaInfo; // Commented out as per instruction
+// use crate::ffmpeg_utils::ffmpeg::Rational; // Commented out as per instruction
 use crate::types::{
     AudioStreamInfo, SegmentInfo, StreamIndex, SubtitleFormat, SubtitleStreamInfo, VideoStreamInfo,
 };
@@ -17,6 +16,7 @@ use crate::types::{
 #[derive(Debug, Clone)]
 pub struct TestMediaInfo {
     pub name: &'static str,
+    #[allow(dead_code)]
     pub description: &'static str,
     pub has_video: bool,
     pub has_audio: bool,
@@ -25,7 +25,7 @@ pub struct TestMediaInfo {
     pub audio_codecs: Vec<ffmpeg::codec::Id>,
     pub subtitle_formats: Vec<ffmpeg::codec::Id>,
     pub duration_secs: f64,
-    pub expected_segments: usize,
+    // pub expected_segments: usize, // Commented out as per instruction
 }
 
 impl TestMediaInfo {
@@ -41,7 +41,7 @@ impl TestMediaInfo {
             audio_codecs: vec![ffmpeg::codec::Id::AAC],
             subtitle_formats: vec![],
             duration_secs: 60.0,
-            expected_segments: 15, // 60s / 4s per segment
+            // expected_segments: 15, // 60s / 4s per segment // Commented out as per instruction
         }
     }
 
@@ -57,7 +57,7 @@ impl TestMediaInfo {
             audio_codecs: vec![ffmpeg::codec::Id::AC3],
             subtitle_formats: vec![],
             duration_secs: 60.0,
-            expected_segments: 15,
+            // expected_segments: 15, // Commented out as per instruction
         }
     }
 
@@ -73,7 +73,7 @@ impl TestMediaInfo {
             audio_codecs: vec![ffmpeg::codec::Id::AAC, ffmpeg::codec::Id::AC3],
             subtitle_formats: vec![],
             duration_secs: 60.0,
-            expected_segments: 15,
+            // expected_segments: 15, // Commented out as per instruction
         }
     }
 
@@ -89,7 +89,7 @@ impl TestMediaInfo {
             audio_codecs: vec![ffmpeg::codec::Id::AAC],
             subtitle_formats: vec![ffmpeg::codec::Id::SUBRIP],
             duration_secs: 60.0,
-            expected_segments: 15,
+            // expected_segments: 15, // Commented out as per instruction
         }
     }
 
@@ -111,7 +111,7 @@ impl TestMediaInfo {
                 ffmpeg::codec::Id::SUBRIP, // Spanish
             ],
             duration_secs: 60.0,
-            expected_segments: 15,
+            // expected_segments: 15, // Commented out as per instruction
         }
     }
 
@@ -128,7 +128,7 @@ impl TestMediaInfo {
             segments: Vec::new(),
             indexed_at: std::time::SystemTime::now(),
             last_accessed: AtomicU64::new(0),
-            segment_first_pts: Arc::new(Vec::new()),
+            segment_first_pts: std::sync::Arc::new(Vec::new()),
         };
 
         // Add video stream
@@ -214,7 +214,7 @@ impl TestMediaInfo {
         // Initialize segment_first_pts
         let n = index.segments.len();
         let v: Vec<AtomicI64> = (0..n).map(|_| AtomicI64::new(i64::MIN)).collect();
-        index.segment_first_pts = Arc::new(v);
+        index.segment_first_pts = std::sync::Arc::new(v);
 
         index
     }
@@ -306,6 +306,7 @@ pub fn fixture_multi_audio() -> TestMediaInfo {
 }
 
 /// Create test fixture for media with subtitles
+#[allow(dead_code)] // Added as per instruction
 pub fn fixture_with_subtitles() -> TestMediaInfo {
     TestMediaInfo::with_subtitles()
 }

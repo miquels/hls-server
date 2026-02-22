@@ -1,6 +1,6 @@
 //! Server-specific error types
 
-use hls_vod_lib::error::HlsError;
+use hls_vod_lib::HlsError;
 use thiserror::Error;
 
 pub type Result<T> = std::result::Result<T, ServerError>;

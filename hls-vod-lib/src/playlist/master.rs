@@ -241,40 +241,6 @@ pub fn generate_master_playlist(index: &StreamIndex, prefix: &str) -> String {
 
     output
 }
-
-/// Generate minimal master playlist for testing
-pub fn generate_minimal_master_playlist(index: &StreamIndex) -> String {
-    let mut output = String::new();
-
-    output.push_str("#EXTM3U\n");
-    output.push_str("#EXT-X-VERSION:7\n");
-    output.push_str("\n");
-
-    let base_name = index
-        .source_path
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_default();
-
-    if let Some(video) = index.primary_video() {
-        let audio_bitrate_list: Vec<_> = index
-            .audio_streams
-            .iter()
-            .map(|a| a.bitrate as u32)
-            .collect();
-        let bandwidth = calculate_bandwidth(video.bitrate.max(100000), &audio_bitrate_list);
-        let resolution = format!("{}x{}", video.width, video.height);
-
-        output.push_str(&format!(
-            "#EXT-X-STREAM-INF:BANDWIDTH={},RESOLUTION={}\n",
-            bandwidth, resolution
-        ));
-        output.push_str(&format!("{}/v/media.m3u8\n", base_name));
-    }
-
-    output
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -354,15 +320,5 @@ mod tests {
         assert!(playlist.contains("TYPE=SUBTITLES"));
         assert!(playlist.contains("video.mp4/s/2.m3u8"));
         assert!(playlist.contains("CODECS=\"avc1.640028,mp4a.40.2,wvtt\""));
-    }
-
-    #[test]
-    fn test_minimal_master_playlist() {
-        let index = create_test_index();
-        let playlist = generate_minimal_master_playlist(&index);
-
-        assert!(playlist.contains("#EXTM3U"));
-        assert!(playlist.contains("#EXT-X-STREAM-INF"));
-        assert!(playlist.contains("video.mp4/v/media.m3u8"));
     }
 }

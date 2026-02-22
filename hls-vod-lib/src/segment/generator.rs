@@ -9,7 +9,8 @@ use crate::types::{SegmentInfo, StreamIndex};
 use ffmpeg_next::{self as ffmpeg, Rescale};
 
 /// Generate an initialization segment (init.mp4)
-pub fn generate_init_segment(index: &StreamIndex) -> Result<Bytes> {
+#[allow(dead_code)] // we'll need this when we support multiplexed tracks
+pub(crate) fn generate_init_segment(index: &StreamIndex) -> Result<Bytes> {
     let input = ffmpeg::format::input(&index.source_path)
         .map_err(|e| HlsError::Ffmpeg(crate::error::FfmpegError::OpenInput(e.to_string())))?;
 
@@ -40,7 +41,7 @@ pub fn generate_init_segment(index: &StreamIndex) -> Result<Bytes> {
 }
 
 /// Generate a video-only initialization segment
-pub fn generate_video_init_segment(index: &StreamIndex) -> Result<Bytes> {
+pub(crate) fn generate_video_init_segment(index: &StreamIndex) -> Result<Bytes> {
     if index.video_streams.is_empty() {
         return Err(HlsError::NoVideoStream);
     }
@@ -85,7 +86,7 @@ pub fn generate_video_init_segment(index: &StreamIndex) -> Result<Bytes> {
 ///
 /// For tracks that need transcoding (non-AAC), the init segment is produced
 /// from the AAC encoder's codec parameters, not the source stream.
-pub fn generate_audio_init_segment(
+pub(crate) fn generate_audio_init_segment(
     index: &StreamIndex,
     track_index: usize,
     force_aac: bool,
@@ -308,7 +309,7 @@ fn patch_tfdts(media_data: &mut Vec<u8>, target_time: u64, start_frag_seq: u32) 
 }
 
 /// Generate a video segment
-pub fn generate_video_segment(
+pub(crate) fn generate_video_segment(
     index: &StreamIndex,
     track_index: usize,
     sequence: usize,
@@ -337,7 +338,7 @@ pub fn generate_video_segment(
 ///
 /// Dispatches to the transcoding pipeline for non-AAC streams; falls back to
 /// direct packet copy for AAC streams.
-pub fn generate_audio_segment(
+pub(crate) fn generate_audio_segment(
     index: &StreamIndex,
     track_index: usize,
     sequence: usize,
@@ -437,9 +438,12 @@ fn generate_transcoded_audio_segment(
     // We strictly align target_time to the 1024-sample grid (the AAC frame size)
     // so that consecutive fragments do not accumulate decimal rounding errors or drift.
     let target_time = {
-        let exact_target =
-            crate::ffmpeg_utils::utils::rescale_ts(segment.start_pts, video_timebase, output_timebase)
-                .max(0) as u64;
+        let exact_target = crate::ffmpeg_utils::utils::rescale_ts(
+            segment.start_pts,
+            video_timebase,
+            output_timebase,
+        )
+        .max(0) as u64;
 
         let grid_size = 1024;
         (exact_target / grid_size) * grid_size
@@ -460,7 +464,7 @@ fn generate_transcoded_audio_segment(
 /// to each subtitle sample in the file.  No full-file scan, no iteration over
 /// video/audio packets — only the subtitle samples that fall within the
 /// requested time range are read.
-pub fn generate_subtitle_segment(
+pub(crate) fn generate_subtitle_segment(
     index: &StreamIndex,
     track_index: usize,
     start_sequence: usize,
@@ -598,7 +602,8 @@ pub fn generate_subtitle_segment(
             st
         }
     };
-    let video_st_in_sub_tb = crate::ffmpeg_utils::utils::rescale_ts(video_st, video_tb, stream_timebase);
+    let video_st_in_sub_tb =
+        crate::ffmpeg_utils::utils::rescale_ts(video_st, video_tb, stream_timebase);
 
     // Build a set of the expected PTS values so we can stop early once all are seen.
     let mut remaining: std::collections::HashSet<i64> = matching.iter().map(|s| s.pts).collect();
@@ -803,8 +808,10 @@ fn generate_media_segment_ffmpeg(
             }
         }
 
-        let is_video = segment_type == "video" && crate::ffmpeg_utils::utils::is_video_codec(codec_id);
-        let is_audio = segment_type == "audio" && crate::ffmpeg_utils::utils::is_audio_codec(codec_id);
+        let is_video =
+            segment_type == "video" && crate::ffmpeg_utils::utils::is_video_codec(codec_id);
+        let is_audio =
+            segment_type == "audio" && crate::ffmpeg_utils::utils::is_audio_codec(codec_id);
 
         if is_video {
             muxer.add_video_stream(&params, idx)?;
@@ -910,8 +917,10 @@ fn generate_media_segment_ffmpeg(
         let timebase = stream.time_base();
 
         // Convert current packet timestamps to 90kHz for comparison
-        let pts_90k = crate::ffmpeg_utils::utils::rescale_ts(pts, timebase, ffmpeg::Rational(1, 90000));
-        let dts_90k = crate::ffmpeg_utils::utils::rescale_ts(dts, timebase, ffmpeg::Rational(1, 90000));
+        let pts_90k =
+            crate::ffmpeg_utils::utils::rescale_ts(pts, timebase, ffmpeg::Rational(1, 90000));
+        let dts_90k =
+            crate::ffmpeg_utils::utils::rescale_ts(dts, timebase, ffmpeg::Rational(1, 90000));
         // Convert segment boundaries (which are in video_timebase) to 90kHz
         let start_pts_90k = crate::ffmpeg_utils::utils::rescale_ts(
             segment.start_pts,
@@ -1109,8 +1118,11 @@ fn generate_media_segment_ffmpeg(
         // For AUDIO: use the cached first_video_pts_90k (tfdt+CT from the video segment)
         // rescaled to audio tb, plus encoder_delay, so the player computes:
         //   (audio_tfdt - elst) / timescale == first_display_video_pts
-        let start_pts_rescaled =
-            crate::ffmpeg_utils::utils::rescale_ts(segment.start_pts, video_timebase, output_timebase);
+        let start_pts_rescaled = crate::ffmpeg_utils::utils::rescale_ts(
+            segment.start_pts,
+            video_timebase,
+            output_timebase,
+        );
         let target_time = if segment_type == "video" {
             start_pts_rescaled.max(0) as u64
         } else {

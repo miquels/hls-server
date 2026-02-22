@@ -78,20 +78,6 @@ pub fn get_subtitle_format(codec_id: ffmpeg::codec::Id) -> SubtitleFormat {
     }
 }
 
-/// Get subtitle codec name for logging
-pub fn get_subtitle_codec_name(codec_id: ffmpeg::codec::Id) -> &'static str {
-    match codec_id {
-        ffmpeg::codec::Id::SUBRIP => "SubRip (SRT)",
-        ffmpeg::codec::Id::ASS | ffmpeg::codec::Id::SSA => "ASS/SSA",
-        ffmpeg::codec::Id::MOV_TEXT => "QuickTime TTXT",
-        ffmpeg::codec::Id::WEBVTT => "WebVTT",
-        ffmpeg::codec::Id::TEXT => "Plain Text",
-        ffmpeg::codec::Id::HDMV_PGS_SUBTITLE => "PGS (Bitmap)",
-        ffmpeg::codec::Id::DVB_SUBTITLE => "DVB (Bitmap)",
-        _ => "Unknown",
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

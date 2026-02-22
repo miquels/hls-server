@@ -101,10 +101,10 @@ impl AppState {
         segment_type: &str,
         sequence: usize,
         generate: F,
-    ) -> hls_vod_lib::error::Result<Bytes>
+    ) -> hls_vod_lib::Result<Bytes>
     where
         F: FnOnce() -> Fut + Send + 'static,
-        Fut: std::future::Future<Output = hls_vod_lib::error::Result<Bytes>> + Send + 'static,
+        Fut: std::future::Future<Output = hls_vod_lib::Result<Bytes>> + Send + 'static,
     {
         let cache_key =
             crate::http::cache::SegmentCache::make_key(stream_id, segment_type, sequence);

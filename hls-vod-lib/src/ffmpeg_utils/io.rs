@@ -38,6 +38,7 @@ impl MemoryWriter {
     }
 
     /// Check if the buffer is empty
+    #[allow(dead_code)] // we need this for testing and development
     pub fn is_empty(&self) -> bool {
         self.buffer.is_empty()
     }

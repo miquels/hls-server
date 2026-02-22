@@ -7,7 +7,7 @@ use crate::types::StreamIndex;
 /// Generate video variant playlist
 ///
 /// Creates video.m3u8 with segment references
-pub fn generate_video_playlist(index: &StreamIndex) -> String {
+pub(crate) fn generate_video_playlist(index: &StreamIndex) -> String {
     let mut output = String::new();
 
     // Calculate target duration
@@ -40,7 +40,11 @@ pub fn generate_video_playlist(index: &StreamIndex) -> String {
 /// Generate audio variant playlist
 ///
 /// Creates a/<track_index>.m3u8 with segment references
-pub fn generate_audio_playlist(index: &StreamIndex, track_index: usize, force_aac: bool) -> String {
+pub(crate) fn generate_audio_playlist(
+    index: &StreamIndex,
+    track_index: usize,
+    force_aac: bool,
+) -> String {
     let mut output = String::new();
 
     // Calculate target duration
@@ -81,7 +85,7 @@ pub fn generate_audio_playlist(index: &StreamIndex, track_index: usize, force_aa
 /// Generate subtitle variant playlist
 ///
 /// Creates s/<track_index>.m3u8 with WebVTT segment references
-pub fn generate_subtitle_playlist(index: &StreamIndex, track_index: usize) -> String {
+pub(crate) fn generate_subtitle_playlist(index: &StreamIndex, track_index: usize) -> String {
     let mut output = String::new();
 
     // Find the subtitle stream info to check for non-empty sequences

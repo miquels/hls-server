@@ -6,7 +6,7 @@
 //! complete index are rejected with `HlsError::NoIndex`.
 
 use std::path::Path;
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 
 use ffmpeg_next as ffmpeg;
 
@@ -21,26 +21,18 @@ use super::{analyze_audio_stream, analyze_subtitle_stream, analyze_video_stream}
 pub struct IndexOptions {
     /// Target segment duration in seconds
     pub segment_duration_secs: f64,
-    /// Kept for API compatibility; no longer used (index-based scan has no timeout).
-    pub timeout: Option<Duration>,
 }
 
 impl Default for IndexOptions {
     fn default() -> Self {
         Self {
             segment_duration_secs: 4.0,
-            timeout: Some(Duration::from_secs(30)),
         }
     }
 }
 
 /// Scan a media file and extract all metadata
 pub fn scan_file<P: AsRef<Path>>(path: P) -> Result<StreamIndex> {
-    scan_file_with_options(path, &IndexOptions::default())
-}
-
-/// Scan a media file with timeout handling
-pub fn scan_file_with_timeout<P: AsRef<Path>>(path: P, _timeout: Duration) -> Result<StreamIndex> {
     scan_file_with_options(path, &IndexOptions::default())
 }
 
@@ -71,7 +63,9 @@ pub fn scan_file_with_options<P: AsRef<Path>>(
                 Ok(info) => {
                     tracing::debug!(
                         "Found video stream: {}x{}, codec={:?}",
-                        info.width, info.height, info.codec_id
+                        info.width,
+                        info.height,
+                        info.codec_id
                     );
                     index.video_streams.push(info);
                 }
@@ -81,7 +75,9 @@ pub fn scan_file_with_options<P: AsRef<Path>>(
                 Ok(info) => {
                     tracing::debug!(
                         "Found audio stream: {}Hz, {} channels, codec={:?}",
-                        info.sample_rate, info.channels, info.codec_id
+                        info.sample_rate,
+                        info.channels,
+                        info.codec_id
                     );
                     index.audio_streams.push(info);
                 }
@@ -91,7 +87,8 @@ pub fn scan_file_with_options<P: AsRef<Path>>(
                 if let Some(info) = analyze_subtitle_stream(&stream, i) {
                     tracing::debug!(
                         "Found subtitle stream: language={:?}, format={:?}",
-                        info.language, info.format
+                        info.language,
+                        info.format
                     );
                     index.subtitle_streams.push(info);
                 }
@@ -123,7 +120,8 @@ pub fn scan_file_with_options<P: AsRef<Path>>(
     tracing::debug!(
         "Video stream {}: timebase={}/{}, start_time={}, start_time_sec={:.6}",
         video_stream_idx,
-        video_tb.numerator(), video_tb.denominator(),
+        video_tb.numerator(),
+        video_tb.denominator(),
         video_start_time,
         video_start_time as f64 * video_tb.numerator() as f64 / video_tb.denominator() as f64
     );
@@ -143,7 +141,9 @@ pub fn scan_file_with_options<P: AsRef<Path>>(
     if let Some(first) = video_entries.first() {
         tracing::debug!(
             "First video index entry: pts={}, pos={}, is_keyframe={}",
-            first.timestamp, first.pos, first.is_keyframe()
+            first.timestamp,
+            first.pos,
+            first.is_keyframe()
         );
     }
 
@@ -155,10 +155,8 @@ pub fn scan_file_with_options<P: AsRef<Path>>(
     // so we must set: tfdt = video_presentation * timescale + encoder_delay
     {
         use std::collections::HashMap;
-        let audio_indices: std::collections::HashSet<usize> = index.audio_streams
-            .iter()
-            .map(|a| a.stream_index)
-            .collect();
+        let audio_indices: std::collections::HashSet<usize> =
+            index.audio_streams.iter().map(|a| a.stream_index).collect();
         let mut delays: HashMap<usize, i64> = HashMap::new();
 
         for (stream, packet) in context.packets() {
@@ -171,7 +169,9 @@ pub fn scan_file_with_options<P: AsRef<Path>>(
             delays.insert(idx, delay);
             tracing::debug!(
                 "Audio stream {}: first_pkt_dts={}, encoder_delay={}",
-                idx, dts, delay
+                idx,
+                dts,
+                delay
             );
             if delays.len() == audio_indices.len() {
                 break;
@@ -195,7 +195,8 @@ pub fn scan_file_with_options<P: AsRef<Path>>(
     if let Some(seg0) = segments.first() {
         tracing::debug!(
             "Segment 0: start_pts={}, end_pts={}, start_sec={:.6}",
-            seg0.start_pts, seg0.end_pts,
+            seg0.start_pts,
+            seg0.end_pts,
             seg0.start_pts as f64 * video_tb.numerator() as f64 / video_tb.denominator() as f64
         );
     }
@@ -384,7 +385,6 @@ mod tests {
     fn test_index_options_default() {
         let options = IndexOptions::default();
         assert_eq!(options.segment_duration_secs, 4.0);
-        assert!(options.timeout.is_some());
     }
 
     #[test]

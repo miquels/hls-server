@@ -202,6 +202,7 @@ pub fn validate_webvtt(content: &str) -> ValidationResult {
 }
 
 /// Validate fMP4 segment structure
+#[allow(dead_code)]
 pub fn validate_fmp4_segment(data: &[u8]) -> ValidationResult {
     let mut errors = Vec::new();
     let mut warnings = Vec::new();
@@ -218,7 +219,10 @@ pub fn validate_fmp4_segment(data: &[u8]) -> ValidationResult {
     // Check for valid box at start
     let box_type = &data[4..8];
     if box_type != b"ftyp" && box_type != b"moov" && box_type != b"moof" {
-        errors.push(format!("Invalid box type at start: {:?}", std::str::from_utf8(box_type)));
+        errors.push(format!(
+            "Invalid box type at start: {:?}",
+            std::str::from_utf8(box_type)
+        ));
     }
 
     // Check for required boxes
@@ -244,12 +248,8 @@ pub fn validate_fmp4_segment(data: &[u8]) -> ValidationResult {
 fn find_box(data: &[u8], box_type: &[u8]) -> Option<usize> {
     let mut pos = 0;
     while pos + 8 <= data.len() {
-        let size = u32::from_be_bytes([
-            data[pos],
-            data[pos + 1],
-            data[pos + 2],
-            data[pos + 3],
-        ]) as usize;
+        let size =
+            u32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
 
         if size < 8 {
             return None;
@@ -272,6 +272,7 @@ fn find_box(data: &[u8], box_type: &[u8]) -> Option<usize> {
 /// Type of playlist
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum PlaylistType {
+    #[allow(dead_code)]
     Master,
     Video,
     Audio,
@@ -283,6 +284,7 @@ pub enum PlaylistType {
 pub struct ValidationResult {
     pub is_valid: bool,
     pub errors: Vec<String>,
+    #[allow(dead_code)]
     pub warnings: Vec<String>,
 }
 
@@ -369,7 +371,7 @@ Hello World
         let mut data = vec![0; 24];
         data[0..4].copy_from_slice(&24u32.to_be_bytes());
         data[4..8].copy_from_slice(b"ftyp");
-        
+
         assert!(find_box(&data, b"ftyp").is_some());
         assert!(find_box(&data, b"moov").is_none());
     }

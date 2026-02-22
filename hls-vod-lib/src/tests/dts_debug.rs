@@ -1,6 +1,7 @@
 //! DTS diagnostic integration test
 
 #[cfg(test)]
+#[allow(dead_code, unused_variables)]
 mod tests {
     use crate::ffmpeg_utils::ffmpeg;
     use crate::segment::generator::{
@@ -178,7 +179,7 @@ mod tests {
             }
             if has_duration {
                 let dur = u32_be(traf, off);
-                total_trun_duration += dur as u64;
+                total_trun_duration += duration_as_u64(dur);
                 if sample_durations.len() < 5 {
                     sample_durations.push(dur);
                 }
@@ -194,6 +195,10 @@ mod tests {
             sample_count,
             sample_durations,
         }
+    }
+
+    fn duration_as_u64(dur: u32) -> u64 {
+        dur as u64
     }
 
     #[test]

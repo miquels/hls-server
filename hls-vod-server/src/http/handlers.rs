@@ -4,13 +4,13 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use bytes::Bytes;
 use serde::Serialize;
 use std::sync::Arc;
 use tracing::debug;
 
 use crate::state::AppState;
-use hls_vod_lib::error::HlsError;
+use bytes::Bytes;
+use hls_vod_lib::HlsError;
 use hls_vod_lib::MediaInfo;
 
 /// Custom error response for HLS operations
@@ -71,7 +71,7 @@ pub async fn version_check() -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "status": "online",
         "version": env!("CARGO_PKG_VERSION"),
-        "ffmpeg": hls_vod_lib::ffmpeg_utils::version_info()
+        "ffmpeg": hls_vod_lib::ffmpeg_version_info()
     }))
 }
 
@@ -84,7 +84,7 @@ pub async fn master_playlist(
 ) -> Result<Response, HttpError> {
     let media = state.get_media_or_error(stream_id)?;
 
-    let playlist = hls_vod_lib::api::generate_main_playlist(&media, prefix)?;
+    let playlist = hls_vod_lib::generate_main_playlist(&media, prefix)?;
 
     let mut headers = HeaderMap::new();
     headers.insert(
@@ -102,7 +102,7 @@ pub async fn video_playlist(state: &AppState, stream_id: &str) -> Result<Respons
     let media = state.get_media_or_error(stream_id)?;
 
     let playlist_id = "v/media.m3u8";
-    let playlist = hls_vod_lib::api::generate_track_playlist(&media, playlist_id)?;
+    let playlist = hls_vod_lib::generate_track_playlist(&media, playlist_id)?;
 
     let mut headers = HeaderMap::new();
     headers.insert(
@@ -130,7 +130,7 @@ pub async fn audio_playlist(
         format!("a/{}.m3u8", track_index)
     };
 
-    let playlist = hls_vod_lib::api::generate_track_playlist(&media, &playlist_id)?;
+    let playlist = hls_vod_lib::generate_track_playlist(&media, &playlist_id)?;
 
     let mut headers = HeaderMap::new();
     headers.insert(
@@ -152,7 +152,7 @@ pub async fn subtitle_playlist(
     let media = state.get_media_or_error(stream_id)?;
 
     let playlist_id = format!("s/{}.m3u8", track_index);
-    let playlist = hls_vod_lib::api::generate_track_playlist(&media, &playlist_id)?;
+    let playlist = hls_vod_lib::generate_track_playlist(&media, &playlist_id)?;
 
     let mut headers = HeaderMap::new();
     headers.insert(
@@ -170,7 +170,7 @@ pub async fn video_init_segment(state: &AppState, stream_id: &str) -> Result<Res
     let media = state.get_media_or_error(stream_id)?;
 
     let segment_id = "v/init.mp4";
-    let bytes = hls_vod_lib::api::generate_segment(&media, segment_id)?;
+    let bytes = hls_vod_lib::generate_segment(&media, segment_id)?;
 
     let mut headers = HeaderMap::new();
     headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("video/mp4"));
@@ -198,7 +198,7 @@ pub async fn audio_init_segment(
         format!("a/{}/init.mp4", track_index)
     };
 
-    let bytes = hls_vod_lib::api::generate_segment(&media, &segment_id)?;
+    let bytes = hls_vod_lib::generate_segment(&media, &segment_id)?;
 
     let mut headers = HeaderMap::new();
     headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("video/mp4"));
@@ -235,7 +235,7 @@ pub async fn video_segment(
     }
 
     let segment_id = format!("v/{}.m4s", sequence);
-    let bytes = hls_vod_lib::api::generate_segment(&media, &segment_id)?;
+    let bytes = hls_vod_lib::generate_segment(&media, &segment_id)?;
 
     // Update cache
     state
@@ -293,7 +293,7 @@ pub async fn audio_segment(
         format!("a/{}/{}.m4s", track_index, sequence)
     };
 
-    let bytes = hls_vod_lib::api::generate_segment(&media, &segment_id)?;
+    let bytes = hls_vod_lib::generate_segment(&media, &segment_id)?;
 
     // Update cache
     state.segment_cache.insert(
@@ -329,7 +329,7 @@ pub async fn subtitle_segment(
 
     let segment_id = format!("s/{}/{}-{}.vtt", track_index, start_seq, end_seq);
 
-    let bytes = hls_vod_lib::api::generate_segment(&media, &segment_id)?;
+    let bytes = hls_vod_lib::generate_segment(&media, &segment_id)?;
 
     let mut headers = HeaderMap::new();
     headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("text/vtt"));

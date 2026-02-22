@@ -6,7 +6,6 @@
 //! - Custom AVIOContext for in-memory writing
 //! - Timebase conversion and other utilities
 
-pub mod context;
 pub mod helpers;
 pub mod index;
 pub mod io;

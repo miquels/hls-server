@@ -206,6 +206,7 @@ impl Fmp4Muxer {
     }
 
     /// Access inner memory writer data directly (peek)
+    #[allow(dead_code)] // we need this for testing and development
     pub fn current_data(&self) -> Vec<u8> {
         self.writer.data()
     }
@@ -225,10 +226,12 @@ impl Fmp4Muxer {
 ///   presentation = (tfdt - elst_media_time) / timescale
 ///
 /// Returns `Some(media_time)` if an elst entry is found, `None` otherwise.
+#[allow(dead_code)] // we need this for testing and development
 pub fn parse_elst_media_time(data: &[u8]) -> Option<i64> {
     parse_elst_in_boxes(data)
 }
 
+#[allow(dead_code)] // we need this for testing and development
 fn parse_elst_in_boxes(data: &[u8]) -> Option<i64> {
     let mut pos = 0;
     while pos + 8 <= data.len() {
@@ -346,6 +349,7 @@ pub fn mux_aac_packets_to_fmp4(
     Ok(data)
 }
 
+#[allow(dead_code)] // we need this for testing and development
 pub fn validate_fmp4(data: &[u8]) -> bool {
     if data.len() < 8 {
         return false;
@@ -357,6 +361,7 @@ pub fn validate_fmp4(data: &[u8]) -> bool {
 }
 
 /// Find a specific box in fMP4 data
+#[allow(dead_code)] // we need this for testing and development
 pub fn find_box(data: &[u8], box_type: &[u8]) -> Option<usize> {
     let mut pos = 0;
     while pos + 8 <= data.len() {

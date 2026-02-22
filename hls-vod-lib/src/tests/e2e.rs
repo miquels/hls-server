@@ -20,10 +20,10 @@ pub fn test_stream_lifecycle() -> ValidationResult {
 
     let media = crate::api::parse_file(&asset_path, true).expect("Failed to scan test asset");
     let stream_id = media.index.stream_id.clone();
-    let prefix = format!("/streams/{}", stream_id);
+    let _prefix = format!("/streams/{}", stream_id); // Changed to _prefix as per instruction
 
     // Generate and validate master playlist
-    let master = generate_main_playlist(&media, &prefix).expect("Failed to generate master");
+    let master = generate_main_playlist(&media, &_prefix).expect("Failed to generate master"); // Changed to use _prefix
     let master_result = validate_master_playlist(&master);
     if !master_result.is_valid {
         return master_result;
@@ -315,7 +315,7 @@ mod tests {
         }
 
         let media = crate::api::parse_file(&asset_path, true).expect("Failed to scan webm asset");
-        let prefix = format!("/streams/{}", media.index.stream_id);
+        let _prefix = format!("/streams/{}", media.index.stream_id);
 
         // Find audio
         let audio_stream = media.index.audio_streams.first().unwrap();

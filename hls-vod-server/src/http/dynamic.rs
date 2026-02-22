@@ -89,7 +89,7 @@ pub async fn handle_dynamic_request(
                 async move {
                     info!("Indexing new file: {:?}", media_path2);
                     let new_media = tokio::task::spawn_blocking(move || {
-                        hls_vod_lib::api::parse_file(&media_path2, true)
+                        hls_vod_lib::parse_file(&media_path2, true)
                     })
                     .await
                     .map_err(|e| HttpError::InternalError(e.to_string()))?
