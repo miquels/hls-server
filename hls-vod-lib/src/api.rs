@@ -138,9 +138,28 @@ impl MediaInfo {
         Ok(Self::build_media_info(path, index, false))
     }
 
-    /// Open a media file, performing full segment indexing.
-    /// Uses `stream_id` for caching if provided, otherwise generates a new one.
-    pub fn open(path: &Path, stream_id: Option<String>) -> Result<std::sync::Arc<MediaInfo>> {
+    /// Opens and indexes a media file, caching the result if a stream ID is provided.
+    ///
+    /// The `codecs` parameter allows filtering the tracks within the media file. Only tracks
+    /// matching the provided list of codecs will be retained. If `codecs` is empty, no filtering
+    /// is performed.
+    ///
+    /// The following standard browser-friendly codec names and aliases are supported (case-insensitive):
+    /// - **AAC**: `"mp4a.40.2"`, `"aac"`
+    /// - **Dolby Digital (AC-3)**: `"ac-3"`, `"ac3"`
+    /// - **Dolby Digital Plus (E-AC-3)**: `"ec-3"`, `"eac3"`
+    /// - **MP3**: `"mp4a.40.34"`, `"mp3"`
+    /// - **Opus**: `"opus"`
+    /// - **WebVTT**: `"wvtt"`, `"webvtt"`
+    ///
+    /// If filtering results in all audio streams being removed, the function will attempt a fallback.
+    /// It will restore all audio streams matching the codec of the original primary audio stream, and
+    /// schedule them to be transcoded to AAC, provided that `"mp4a.40.2"` or `"aac"` is in the allowed `codecs`.
+    pub fn open(
+        path: &Path,
+        codecs: &[impl AsRef<str>],
+        stream_id: Option<String>,
+    ) -> Result<std::sync::Arc<MediaInfo>> {
         if let Some(id) = &stream_id {
             if let Some(media) = get_stream_by_id(id) {
                 media.index.touch();
@@ -156,6 +175,66 @@ impl MediaInfo {
 
         if let Some(id) = stream_id {
             index.stream_id = id;
+        }
+
+        // Apply codec filtering if codecs are provided
+        if !codecs.is_empty() {
+            let codec_strs_lower: Vec<String> =
+                codecs.iter().map(|c| c.as_ref().to_lowercase()).collect();
+            let original_audio_streams = index.audio_streams.clone();
+
+            // Filter audio streams
+            index.audio_streams.retain(|a| {
+                let browser_codecs = match a.codec_id {
+                    ffmpeg::codec::Id::AAC => ["mp4a.40.2", "aac"].as_slice(),
+                    ffmpeg::codec::Id::AC3 => ["ac-3", "ac3"].as_slice(),
+                    ffmpeg::codec::Id::EAC3 => ["ec-3", "eac3"].as_slice(),
+                    ffmpeg::codec::Id::MP3 => ["mp4a.40.34", "mp3"].as_slice(),
+                    ffmpeg::codec::Id::OPUS => ["opus"].as_slice(),
+                    _ => &[].as_slice(),
+                };
+
+                if browser_codecs
+                    .iter()
+                    .any(|&m| codec_strs_lower.contains(&m.to_string()))
+                {
+                    return true;
+                }
+
+                // Fallback to exact enum match
+                let codec_name = format!("{:?}", a.codec_id).to_lowercase();
+                codec_strs_lower.contains(&codec_name)
+            });
+
+            // Filter subtitle streams (typically 'webvtt' or 'wvtt')
+            index.subtitle_streams.retain(|s| {
+                let codec_name = match s.codec_id {
+                    ffmpeg::codec::Id::WEBVTT => "wvtt",
+                    _ => "",
+                };
+                codec_strs_lower.contains(&codec_name.to_string())
+                    || codec_strs_lower.contains(&"webvtt".to_string())
+            });
+
+            // If we filtered out all audio streams, but the source had audio streams,
+            // we should transcode all audio streams matching the codec of the primary
+            // audio stream to AAC, ONLY IF "aac" or "mp4a.40.2" is in the supported codecs list.
+            if index.audio_streams.is_empty() && !original_audio_streams.is_empty() {
+                if codec_strs_lower.contains(&"aac".to_string())
+                    || codec_strs_lower.contains(&"mp4a.40.2".to_string())
+                {
+                    let fallback_codec = original_audio_streams[0].codec_id;
+                    for mut fallback in original_audio_streams
+                        .into_iter()
+                        .filter(|s| s.codec_id == fallback_codec)
+                    {
+                        fallback.is_transcoded = true;
+                        // Note: We keep the original codec_id in the stream info so the transcoder
+                        // knows what to decode FROM. `TrackInfo` will map `is_transcoded` to "aac".
+                        index.audio_streams.push(fallback);
+                    }
+                }
+            }
         }
 
         let media = std::sync::Arc::new(Self::build_media_info(path, index, true));
@@ -187,16 +266,22 @@ impl MediaInfo {
 
         // Audio tracks
         for a in &index.audio_streams {
+            let (final_codec, transcode_to) = if a.is_transcoded {
+                ("aac".to_string(), Some("aac".to_string()))
+            } else {
+                (format!("{:?}", a.codec_id), None)
+            };
+
             tracks.push(TrackInfo {
                 id: format!("a/{}", a.stream_index),
                 track_type: TrackType::Audio {
                     channels: a.channels,
                     sample_rate: a.sample_rate,
                 },
-                codec_id: format!("{:?}", a.codec_id),
+                codec_id: final_codec,
                 language: a.language.clone(),
                 bitrate: Some(a.bitrate),
-                transcode_to: None,
+                transcode_to,
             });
         }
 

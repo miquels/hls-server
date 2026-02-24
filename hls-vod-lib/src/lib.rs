@@ -24,7 +24,6 @@
 //! 4. **Segments:** Generate actual media segments (fMP4 or WebVTT) handling specific sequence requests with `MediaInfo::generate_segment`.
 
 pub(crate) mod api;
-pub(crate) mod audio_plan;
 pub(crate) mod cache;
 pub(crate) mod error;
 pub(crate) mod ffmpeg_utils;

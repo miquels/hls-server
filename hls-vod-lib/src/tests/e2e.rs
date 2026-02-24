@@ -18,7 +18,7 @@ pub fn test_stream_lifecycle() -> ValidationResult {
         return ValidationResult::success(); // Skip if asset missing
     }
 
-    let media = MediaInfo::open(&asset_path, None).expect("Parsing failed");
+    let media = MediaInfo::open(&asset_path, &[] as &[&str], None).expect("Parsing failed");
     let stream_id = media.index.stream_id.clone();
     let _prefix = format!("/streams/{}", stream_id); // Changed to _prefix as per instruction
 
@@ -326,7 +326,8 @@ mod tests {
             return;
         }
 
-        let media = MediaInfo::open(&asset_path, None).expect("Failed to scan webm asset");
+        let media =
+            MediaInfo::open(&asset_path, &[] as &[&str], None).expect("Failed to scan webm asset");
         let _prefix = format!("/streams/{}", media.index.stream_id);
 
         // Find audio
@@ -343,6 +344,13 @@ mod tests {
         .unwrap();
 
         assert!(!packets.is_empty(), "Expected some AAC packets");
+
+        let m3u8 = crate::playlist::generate_master_playlist(&media.index, "prefix");
+        println!("MASTER PLAYLIST:\n{}", m3u8);
+        assert!(
+            m3u8.contains("Audio Tracks"),
+            "Playlist does not contain Audio Tracks"
+        );
     }
 
     #[test]

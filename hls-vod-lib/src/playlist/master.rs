@@ -3,7 +3,6 @@
 //! Generates the master.m3u8 playlist that references all variant playlists.
 
 use super::codec::{build_codec_attribute, calculate_bandwidth};
-use crate::audio_plan::plan_audio_tracks;
 use crate::types::StreamIndex;
 
 /// Generate master playlist content
@@ -25,8 +24,7 @@ pub fn generate_master_playlist(index: &StreamIndex, prefix: &str) -> String {
     // Use provided prefix for URLs
     let base_name = prefix;
 
-    // Get audio track plan
-    let audio_plan = plan_audio_tracks(&index.audio_streams);
+    // Stream details collected directly from index
 
     // Convert 3-letter language code to 2-letter (RFC5646)
     fn to_rfc5646(lang: &str) -> &str {
@@ -45,15 +43,15 @@ pub fn generate_master_playlist(index: &StreamIndex, prefix: &str) -> String {
         }
     }
 
-    /// Return the codec-family GROUP-ID for a given variant.
+    /// Return the codec-family GROUP-ID for a given stream.
     /// All transcoded variants are placed in the "audio-aac" group.
-    fn group_id_for_variant(variant: &crate::audio_plan::planner::AudioVariant) -> &'static str {
-        if variant.requires_transcode {
+    fn group_id_for_stream(stream: &crate::types::AudioStreamInfo) -> &'static str {
+        if stream.is_transcoded {
             return "audio-aac";
         }
 
         use ffmpeg_next::codec::Id;
-        match variant.codec_id {
+        match stream.codec_id {
             Id::AAC => "audio-aac",
             Id::AC3 => "audio-ac3",
             Id::EAC3 => "audio-eac3",
@@ -74,35 +72,47 @@ pub fn generate_master_playlist(index: &StreamIndex, prefix: &str) -> String {
         }
     }
 
-    // ── Audio MEDIA groups ─────────────────────────────────────────────────
-    if audio_plan.has_audio() {
+    if !index.audio_streams.is_empty() {
         output.push_str("# Audio Tracks\n");
 
         // Sort variants for stable output: by group_id then stream_index
-        let mut variants_sorted = audio_plan.variants.clone();
-        variants_sorted.sort_by(|a, b| {
-            let ga = group_id_for_variant(a);
-            let gb = group_id_for_variant(b);
+        let mut streams_sorted = index.audio_streams.clone();
+        streams_sorted.sort_by(|a, b| {
+            let ga = group_id_for_stream(a);
+            let gb = group_id_for_stream(b);
             ga.cmp(gb).then(a.stream_index.cmp(&b.stream_index))
         });
 
         // Track which group_ids we've seen so we can mark the first of each as DEFAULT
         let mut seen_groups: std::collections::HashSet<&str> = std::collections::HashSet::new();
 
-        for variant in &variants_sorted {
-            let group_id = group_id_for_variant(variant);
+        for variant in &streams_sorted {
+            let group_id = group_id_for_stream(variant);
             let language = variant.language.as_deref().unwrap_or("und");
             let language_rfc = to_rfc5646(language);
-            let name = variant
-                .name
-                .clone()
-                .unwrap_or_else(|| format!("{} Audio", language.to_uppercase()));
+            let codec_label = if variant.is_transcoded {
+                "AAC (Transcoded)"
+            } else {
+                match variant.codec_id {
+                    ffmpeg_next::codec::Id::AAC => "AAC",
+                    ffmpeg_next::codec::Id::AC3 => "Dolby Digital",
+                    ffmpeg_next::codec::Id::EAC3 => "Dolby Digital Plus",
+                    ffmpeg_next::codec::Id::MP3 => "MP3",
+                    ffmpeg_next::codec::Id::OPUS => "Opus",
+                    _ => "Audio",
+                }
+            };
 
-            let _is_first_in_group = seen_groups.insert(group_id);
-            // The variant already has an is_default flag from the planner
-            let default = if variant.is_default { "YES" } else { "NO" };
+            let name = if language == "und" {
+                codec_label.to_string()
+            } else {
+                format!("{} {}", language.to_uppercase(), codec_label)
+            };
 
-            let uri = if variant.requires_transcode {
+            let is_first_in_group = seen_groups.insert(group_id);
+            let default = if is_first_in_group { "YES" } else { "NO" };
+
+            let uri = if variant.is_transcoded {
                 format!("{}/a/{}-aac.m3u8", base_name, variant.stream_index)
             } else {
                 format!("{}/a/{}.m3u8", base_name, variant.stream_index)
@@ -153,8 +163,8 @@ pub fn generate_master_playlist(index: &StreamIndex, prefix: &str) -> String {
         let audio_groups: Vec<&'static str> = {
             let mut seen = std::collections::HashSet::new();
             let mut groups = Vec::new();
-            for v in &audio_plan.variants {
-                let g = group_id_for_variant(v);
+            for s in &index.audio_streams {
+                let g = group_id_for_stream(s);
                 if seen.insert(g) {
                     groups.push(g);
                 }
@@ -214,18 +224,11 @@ pub fn generate_master_playlist(index: &StreamIndex, prefix: &str) -> String {
                 let codecs = codec_list.join(",");
 
                 // Bandwidth: video + all audio streams in this group
-                let group_audio_bitrates: Vec<u32> = audio_plan
-                    .variants
+                let group_audio_bitrates: Vec<u32> = index
+                    .audio_streams
                     .iter()
-                    .filter(|v| group_id_for_variant(v) == *group_id)
-                    .map(|v| {
-                        index
-                            .audio_streams
-                            .iter()
-                            .find(|a| a.stream_index == v.stream_index)
-                            .map(|a| a.bitrate as u32)
-                            .unwrap_or(128_000)
-                    })
+                    .filter(|s| group_id_for_stream(s) == *group_id)
+                    .map(|s| s.bitrate as u32)
                     .collect();
                 let bandwidth =
                     calculate_bandwidth(video.bitrate.max(100_000), &group_audio_bitrates);

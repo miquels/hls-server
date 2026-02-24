@@ -214,7 +214,8 @@ mod tests {
             return;
         }
 
-        let media = crate::api::MediaInfo::open(&asset_path, None).expect("Parsing failed");
+        let media =
+            crate::api::MediaInfo::open(&asset_path, &[] as &[&str], None).expect("Parsing failed");
         let stream_id = media.index.stream_id.clone();
         let index = &media.index;
 
@@ -267,7 +268,8 @@ mod tests {
             return;
         }
 
-        let media = crate::api::MediaInfo::open(&asset_path, None).expect("Parsing failed");
+        let media =
+            crate::api::MediaInfo::open(&asset_path, &[] as &[&str], None).expect("Parsing failed");
         let stream_id = media.index.stream_id.clone();
         let index = &media.index;
         let audio_stream = index.audio_streams.first().expect("No audio stream found");

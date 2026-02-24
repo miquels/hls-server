@@ -53,6 +53,9 @@ pub fn parse_path(full_path: &str) -> Option<(PathBuf, String)> {
 pub async fn handle_dynamic_request(
     axum::extract::State(state): axum::extract::State<Arc<AppState>>,
     axum::extract::Path(path): axum::extract::Path<String>,
+    axum::extract::Query(query_params): axum::extract::Query<
+        std::collections::HashMap<String, String>,
+    >,
 ) -> Result<axum::response::Response, HttpError> {
     let (media_path, suffix) = parse_path(&path).ok_or_else(|| {
         HttpError::SegmentNotFound(format!(
@@ -60,6 +63,11 @@ pub async fn handle_dynamic_request(
             path
         ))
     })?;
+
+    let codecs: Vec<String> = query_params
+        .get("codecs")
+        .map(|s| s.split(',').map(|c| c.trim().to_string()).collect())
+        .unwrap_or_default();
 
     let path_str = media_path.to_string_lossy().to_string();
 
@@ -85,30 +93,38 @@ pub async fn handle_dynamic_request(
         (Some(parts[0].to_string()), parts[1].to_string())
     };
 
-    // Deduplicate concurrent indexing of the same file
+    // Deduplicate concurrent indexing of the same file + codec profile
+    let dedup_key = if codecs.is_empty() {
+        path_str.clone()
+    } else {
+        format!("{}|{}", path_str, codecs.join(","))
+    };
+
     let media = {
         let cell = state
             .indexing_in_flight
-            .entry(path_str.clone())
+            .entry(dedup_key.clone())
             .or_insert_with(|| Arc::new(tokio::sync::OnceCell::new()))
             .clone();
 
         cell.get_or_try_init(|| {
             let media_path2 = media_path.clone();
-            let path_str2 = path_str.clone();
+            let dedup_key2 = dedup_key.clone();
             let state2 = state.clone();
             let sid = stream_id.clone();
+            let codecs_clone = codecs.clone();
             async move {
                 info!("Opening media: {:?} (stream_id: {:?})", media_path2, sid);
                 let result = tokio::task::spawn_blocking(move || {
-                    hls_vod_lib::MediaInfo::open(&media_path2, sid)
+                    let codecs_refs: Vec<&str> = codecs_clone.iter().map(|s| s.as_str()).collect();
+                    hls_vod_lib::MediaInfo::open(&media_path2, &codecs_refs, sid)
                 })
                 .await
                 .map_err(|e| HttpError::InternalError(e.to_string()))?
                 .map_err(|e| HttpError::InternalError(format!("Failed to open media: {}", e)));
 
                 if result.is_err() {
-                    state2.indexing_in_flight.remove(&path_str2);
+                    state2.indexing_in_flight.remove(&dedup_key2);
                 }
                 result
             }

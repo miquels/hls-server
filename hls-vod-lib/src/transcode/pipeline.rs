@@ -22,7 +22,14 @@ pub use super::resampler::HLS_SAMPLE_RATE;
 /// AAC streams can be muxed directly; everything else must be decoded and
 /// re-encoded to AAC.
 pub fn needs_transcoding(audio_stream: &AudioStreamInfo) -> bool {
-    !crate::audio_plan::planner::is_hls_supported_codec(audio_stream.codec_id)
+    !matches!(
+        audio_stream.codec_id,
+        ffmpeg_next::codec::Id::AAC
+            | ffmpeg_next::codec::Id::AC3
+            | ffmpeg_next::codec::Id::EAC3
+            | ffmpeg_next::codec::Id::MP3
+            | ffmpeg_next::codec::Id::OPUS
+    )
 }
 
 /// Transcode audio packets from a source segment into AAC packets.
