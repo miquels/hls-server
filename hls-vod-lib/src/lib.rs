@@ -14,12 +14,14 @@
 //!
 //! ## Usage
 //!
-//! 1. **Initialization:** Call `init()` and `install_log_filter()` at startup.
-//! 2. **Parsing:** Use `parse_file` to scan a media file and generate a `MediaInfo` struct.
+//! 1. **Initialization:** Call `init()` and `install_log_filter()` at startup. `init_cache()` too
+//!    if you are going to generate segments.
+//! 2. **Parsing:** Use `MediaInfo::open` to scan a media file and return an `<Arc<MediaInfo>` struct.
+//!    The information is cached, it's cheap to call after the first tume.
 //! 3. **Playlists:**
-//!    - Generate a master playlist with `generate_main_playlist`.
-//!    - Generate variant playlists (video/audio/subtitle) with `generate_track_playlist`.
-//! 4. **Segments:** Generate actual media segments (fMP4 or WebVTT) handling specific sequence requests with `generate_segment`.
+//!    - Generate a master playlist with `MediaInfo::generate_main_playlist`.
+//!    - Generate variant playlists (video/audio/subtitle) with `MediaInfo::generate_track_playlist`.
+//! 4. **Segments:** Generate actual media segments (fMP4 or WebVTT) handling specific sequence requests with `MediaInfo::generate_segment`.
 
 pub(crate) mod api;
 pub(crate) mod audio_plan;

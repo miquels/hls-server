@@ -1,9 +1,39 @@
+use crate::error::{HlsError, Result};
 use ffmpeg_next as ffmpeg;
+use std::ops::{Deref, DerefMut};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::MutexGuard;
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
+
+/// A transparent wrapper to access an FFmpeg Input context.
+/// It can either hold a freshly opened context (Owned) or a locked reference to a cached one (Shared).
+pub enum ContextGuard<'a> {
+    Owned(ffmpeg::format::context::Input),
+    Shared(MutexGuard<'a, ffmpeg::format::context::Input>),
+}
+
+impl<'a> Deref for ContextGuard<'a> {
+    type Target = ffmpeg::format::context::Input;
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            ContextGuard::Owned(input) => input,
+            ContextGuard::Shared(guard) => &**guard,
+        }
+    }
+}
+
+impl<'a> DerefMut for ContextGuard<'a> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        match self {
+            ContextGuard::Owned(input) => input,
+            ContextGuard::Shared(guard) => &mut **guard,
+        }
+    }
+}
 
 /// Video stream information
 #[derive(Debug, Clone)]
@@ -125,7 +155,6 @@ pub struct SegmentInfo {
 /// Stream index - metadata about a media file.
 /// This struct holds all the pre-calculated timings, tracks, and segment boundaries
 /// necessary to reliably serve HLS playlists and fragments on demand.
-#[derive(Debug)]
 pub struct StreamIndex {
     /// A unique identifier for the stream instance
     pub stream_id: String,
@@ -149,6 +178,34 @@ pub struct StreamIndex {
     pub last_accessed: AtomicU64,
     /// Cache of the exact first PTS for each segment sequence, to perfectly align varying track timelines over time
     pub segment_first_pts: Arc<Vec<AtomicI64>>,
+    /// Protected cache of the opened FFmpeg format context to avoid reopening the file repeatedly
+    pub cached_context: Option<Arc<std::sync::Mutex<ffmpeg::format::context::Input>>>,
+}
+
+impl std::fmt::Debug for StreamIndex {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StreamIndex")
+            .field("stream_id", &self.stream_id)
+            .field("source_path", &self.source_path)
+            .field("duration_secs", &self.duration_secs)
+            .field("video_timebase", &self.video_timebase)
+            .field("video_streams", &self.video_streams)
+            .field("audio_streams", &self.audio_streams)
+            .field("subtitle_streams", &self.subtitle_streams)
+            .field("segments", &self.segments)
+            .field("indexed_at", &self.indexed_at)
+            .field("last_accessed", &self.last_accessed)
+            .field("segment_first_pts", &self.segment_first_pts)
+            .field(
+                "cached_context",
+                &if self.cached_context.is_some() {
+                    "Some(...)"
+                } else {
+                    "None"
+                },
+            )
+            .finish()
+    }
 }
 
 impl Clone for StreamIndex {
@@ -165,6 +222,7 @@ impl Clone for StreamIndex {
             indexed_at: self.indexed_at,
             last_accessed: AtomicU64::new(self.last_accessed.load(Ordering::Relaxed)),
             segment_first_pts: Arc::clone(&self.segment_first_pts),
+            cached_context: self.cached_context.clone(),
         }
     }
 }
@@ -181,13 +239,9 @@ impl StreamIndex {
             subtitle_streams: Vec::new(),
             segments: Vec::new(),
             indexed_at: SystemTime::now(),
-            last_accessed: AtomicU64::new(
-                SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs(),
-            ),
+            last_accessed: AtomicU64::new(0),
             segment_first_pts: Arc::new(Vec::new()),
+            cached_context: None,
         }
     }
 
@@ -212,6 +266,24 @@ impl StreamIndex {
                 Some(v)
             }
         })
+    }
+
+    /// Retrieve a context to read the file.
+    /// Returns either the locked cached context, or freshly opens the file if none is cached.
+    pub fn get_context(&self) -> Result<ContextGuard> {
+        if let Some(arc_mutex) = &self.cached_context {
+            let guard = arc_mutex.lock().map_err(|_| {
+                HlsError::Ffmpeg(crate::error::FfmpegError::OpenInput(
+                    "Poisoned mutex lock on cached input context".to_string(),
+                ))
+            })?;
+            Ok(ContextGuard::Shared(guard))
+        } else {
+            let input = ffmpeg::format::input(&self.source_path).map_err(|e| {
+                HlsError::Ffmpeg(crate::error::FfmpegError::OpenInput(e.to_string()))
+            })?;
+            Ok(ContextGuard::Owned(input))
+        }
     }
 
     pub fn primary_video(&self) -> Option<&VideoStreamInfo> {

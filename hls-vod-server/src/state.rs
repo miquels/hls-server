@@ -13,11 +13,15 @@ use std::sync::Arc;
 use dashmap::DashMap;
 use tokio::sync::OnceCell;
 
+use hls_vod_lib::MediaInfo;
+
 use crate::config::ServerConfig;
 
 /// Application state shared across all handlers
 pub struct AppState {
-    pub indexing_in_flight: DashMap<String, Arc<OnceCell<String>>>,
+    // Used to deduplicate indexing requests for the same relative path.
+    // The key is the file path. The OnceCell will contain the MediaInfo instance.
+    pub indexing_in_flight: DashMap<String, Arc<OnceCell<Arc<MediaInfo>>>>,
 
     /// Server shutdown flag
     pub shutdown: AtomicBool,

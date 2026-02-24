@@ -70,11 +70,23 @@ pub async fn handle_dynamic_request(
         )));
     }
 
+    // If suffix is NOT master.m3u8, it MUST start with a stream_id.
+    // E.g. "STREAMID/v/media.m3u8"
+    let (stream_id, sub_suffix) = if suffix == "master.m3u8" {
+        (None, suffix.clone())
+    } else {
+        let parts: Vec<&str> = suffix.splitn(2, '/').collect();
+        if parts.len() != 2 {
+            return Err(HttpError::SegmentNotFound(format!(
+                "Invalid suffix format (missing stream_id): {}",
+                suffix
+            )));
+        }
+        (Some(parts[0].to_string()), parts[1].to_string())
+    };
+
     // Deduplicate concurrent indexing of the same file
-    // The OnceCell ensures the parsing happens only once.
-    // The entry in `indexing_in_flight` is removed once the stream is successfully indexed
-    // and moved to `streams` map, or if an error occurs.
-    let stream_id = {
+    let media = {
         let cell = state
             .indexing_in_flight
             .entry(path_str.clone())
@@ -85,16 +97,16 @@ pub async fn handle_dynamic_request(
             let media_path2 = media_path.clone();
             let path_str2 = path_str.clone();
             let state2 = state.clone();
+            let sid = stream_id.clone();
             async move {
-                info!("Indexing new file: {:?}", media_path2);
+                info!("Opening media: {:?} (stream_id: {:?})", media_path2, sid);
                 let result = tokio::task::spawn_blocking(move || {
-                    hls_vod_lib::parse_file(&media_path2, true)
+                    hls_vod_lib::MediaInfo::open(&media_path2, sid)
                 })
                 .await
                 .map_err(|e| HttpError::InternalError(e.to_string()))?
-                .map_err(|e| HttpError::InternalError(format!("Failed to index file: {}", e)));
+                .map_err(|e| HttpError::InternalError(format!("Failed to open media: {}", e)));
 
-                // If indexing failed, remove the OnceCell from the map to allow retries
                 if result.is_err() {
                     state2.indexing_in_flight.remove(&path_str2);
                 }
@@ -110,33 +122,33 @@ pub async fn handle_dynamic_request(
     // No explicit `remove` here is needed as the `OnceCell` handles the "once" aspect,
     // and the `streams` map is the final destination.
 
-    if suffix == "master.m3u8" {
-        // Build the correct relative prefix (the basename of the media file, e.g. "bigbucks.mp4")
+    if sub_suffix == "master.m3u8" {
+        // Build the correct relative prefix
         let filename = media_path
             .file_name()
             .unwrap()
             .to_string_lossy()
             .into_owned();
-        return super::handlers::master_playlist(&state, &stream_id, &filename).await;
-    } else if suffix == "v/media.m3u8" {
-        return super::handlers::video_playlist(&state, &stream_id).await;
-    } else if let Some(sub) = suffix.strip_prefix("v/") {
+        let prefix = format!("{}/{}", filename, media.index.stream_id);
+        return super::handlers::master_playlist(&state, &media, &prefix).await;
+    } else if sub_suffix == "v/media.m3u8" {
+        return super::handlers::video_playlist(&state, &media).await;
+    } else if let Some(sub) = sub_suffix.strip_prefix("v/") {
         if let Some(_track_str) = sub.strip_suffix(".init.mp4") {
-            // we could parse track_index but video_init_segment generates for primary video
-            return super::handlers::video_init_segment(&state, &stream_id).await;
+            return super::handlers::video_init_segment(&state, &media).await;
         } else if let Some(rest) = sub.strip_suffix(".m4s") {
             let parts: Vec<&str> = rest.split('.').collect();
             if parts.len() == 2 {
-                let track = parts[0]
+                let _track = parts[0] // Track is typically 0 for primary video
                     .parse::<usize>()
                     .map_err(|_| HttpError::SegmentNotFound("Invalid video track".into()))?;
                 let seq = parts[1]
                     .parse::<usize>()
                     .map_err(|_| HttpError::SegmentNotFound("Invalid video seq".into()))?;
-                return super::handlers::video_segment(&state, &stream_id, seq).await;
+                return super::handlers::video_segment(&state, &media, seq).await;
             }
         }
-    } else if let Some(sub) = suffix.strip_prefix("a/") {
+    } else if let Some(sub) = sub_suffix.strip_prefix("a/") {
         if let Some(mut track_str) = sub.strip_suffix(".m3u8") {
             let mut force_aac = false;
             if let Some(base) = track_str.strip_suffix("-aac") {
@@ -146,7 +158,7 @@ pub async fn handle_dynamic_request(
             let track = track_str
                 .parse::<usize>()
                 .map_err(|_| HttpError::SegmentNotFound("Invalid audio track".into()))?;
-            return super::handlers::audio_playlist(&state, &stream_id, track, force_aac).await;
+            return super::handlers::audio_playlist(&state, &media, track, force_aac).await;
         } else if let Some(mut track_str) = sub.strip_suffix(".init.mp4") {
             let mut force_aac = false;
             if let Some(base) = track_str.strip_suffix("-aac") {
@@ -156,7 +168,7 @@ pub async fn handle_dynamic_request(
             let track = track_str
                 .parse::<usize>()
                 .map_err(|_| HttpError::SegmentNotFound("Invalid audio track".into()))?;
-            return super::handlers::audio_init_segment(&state, &stream_id, track, force_aac).await;
+            return super::handlers::audio_init_segment(&state, &media, track, force_aac).await;
         } else if let Some(rest) = sub.strip_suffix(".m4s") {
             let parts: Vec<&str> = rest.split('.').collect();
             if parts.len() == 2 {
@@ -172,16 +184,15 @@ pub async fn handle_dynamic_request(
                 let seq = parts[1]
                     .parse::<usize>()
                     .map_err(|_| HttpError::SegmentNotFound("Invalid audio seq".into()))?;
-                return super::handlers::audio_segment(&state, &stream_id, track, seq, force_aac)
-                    .await;
+                return super::handlers::audio_segment(&state, &media, track, seq, force_aac).await;
             }
         }
-    } else if let Some(sub) = suffix.strip_prefix("s/") {
+    } else if let Some(sub) = sub_suffix.strip_prefix("s/") {
         if let Some(track_str) = sub.strip_suffix(".m3u8") {
             let track = track_str
                 .parse::<usize>()
                 .map_err(|_| HttpError::SegmentNotFound("Invalid subtitle track".into()))?;
-            return super::handlers::subtitle_playlist(&state, &stream_id, track).await;
+            return super::handlers::subtitle_playlist(&state, &media, track).await;
         } else if let Some(rest) = sub.strip_suffix(".vtt") {
             let parts: Vec<&str> = rest.split('.').collect();
             if parts.len() == 2 {
@@ -189,7 +200,6 @@ pub async fn handle_dynamic_request(
                     .parse::<usize>()
                     .map_err(|_| HttpError::SegmentNotFound("Invalid subtitle track".into()))?;
 
-                // Sequence can be "5" or "5-10"
                 let seq_part = parts[1];
                 let (start_seq, end_seq) = if seq_part.contains('-') {
                     let mut seq_parts = seq_part.split('-');
@@ -202,7 +212,7 @@ pub async fn handle_dynamic_request(
                 };
 
                 return super::handlers::subtitle_segment(
-                    &state, &stream_id, track, start_seq, end_seq,
+                    &state, &media, track, start_seq, end_seq,
                 )
                 .await;
             }

@@ -11,8 +11,7 @@ use ffmpeg_next::{self as ffmpeg, Rescale};
 /// Generate an initialization segment (init.mp4)
 #[allow(dead_code)] // we'll need this when we support multiplexed tracks
 pub(crate) fn generate_init_segment(index: &StreamIndex) -> Result<Bytes> {
-    let input = ffmpeg::format::input(&index.source_path)
-        .map_err(|e| HlsError::Ffmpeg(crate::error::FfmpegError::OpenInput(e.to_string())))?;
+    let input = index.get_context()?;
 
     let mut muxer = Fmp4Muxer::new()?;
 
@@ -46,8 +45,7 @@ pub(crate) fn generate_video_init_segment(index: &StreamIndex) -> Result<Bytes> 
         return Err(HlsError::NoVideoStream);
     }
 
-    let input = ffmpeg::format::input(&index.source_path)
-        .map_err(|e| HlsError::Ffmpeg(crate::error::FfmpegError::OpenInput(e.to_string())))?;
+    let input = index.get_context()?;
 
     let mut muxer = Fmp4Muxer::new()?;
 
@@ -117,8 +115,7 @@ pub(crate) fn generate_audio_init_segment(
     }
 
     // Source is already Native (AAC, AC3, Opus) — copy parameters directly
-    let mut input = ffmpeg::format::input(&index.source_path)
-        .map_err(|e| HlsError::Ffmpeg(crate::error::FfmpegError::OpenInput(e.to_string())))?;
+    let mut input = index.get_context()?;
 
     let mut muxer = Fmp4Muxer::new()?;
 
@@ -248,13 +245,7 @@ pub(crate) fn generate_video_segment(
             sequence,
         })?;
 
-    generate_media_segment_ffmpeg(
-        &index.source_path,
-        segment,
-        "video",
-        Some(track_index),
-        index,
-    )
+    generate_media_segment_ffmpeg(segment, "video", Some(track_index), index)
 }
 
 /// Generate an audio segment
@@ -299,13 +290,7 @@ pub(crate) fn generate_audio_segment(
 
         generate_transcoded_audio_segment(index, audio_info, segment)
     } else {
-        generate_media_segment_ffmpeg(
-            &index.source_path,
-            segment,
-            "audio",
-            Some(track_index),
-            index,
-        )
+        generate_media_segment_ffmpeg(segment, "audio", Some(track_index), index)
     }
 }
 
@@ -496,8 +481,7 @@ pub(crate) fn generate_subtitle_segment(
     // Instead we do a single timestamp seek and iterate only subtitle packets,
     // stopping as soon as we pass abs_end.  The sample_index tells us the exact
     // PTS range so we never scan the whole file.
-    let mut input = ffmpeg::format::input(&index.source_path)
-        .map_err(|e| HlsError::Ffmpeg(crate::error::FfmpegError::OpenInput(e.to_string())))?;
+    let mut input = index.get_context()?;
 
     // Seek to just before the first matching sample using AV_TIME_BASE (µs).
     let first_sample_pts = matching.first().map(|s| s.pts).unwrap_or(abs_start);
@@ -692,14 +676,12 @@ pub fn read_first_display_pts(data: &[u8]) -> Option<i64> {
 
 /// Generate a media segment using FFmpeg (CMAF-style fragmented MP4)
 fn generate_media_segment_ffmpeg(
-    source_path: &Path,
     segment: &SegmentInfo,
     segment_type: &str,
     target_track_index: Option<usize>,
     index: &StreamIndex,
 ) -> Result<Bytes> {
-    let mut input = ffmpeg::format::input(&source_path)
-        .map_err(|e| HlsError::Ffmpeg(crate::error::FfmpegError::OpenInput(e.to_string())))?;
+    let mut input = index.get_context()?;
 
     let mut muxer = Fmp4Muxer::new()?;
     // We create a new muxer for each segment, which writes an init segment (header).
@@ -1252,7 +1234,8 @@ mod tests {
             segments: vec![],
             indexed_at: std::time::SystemTime::now(),
             last_accessed: std::sync::atomic::AtomicU64::new(0),
-            segment_first_pts: std::sync::Arc::new(vec![]),
+            segment_first_pts: std::sync::Arc::new(Vec::new()),
+            cached_context: None,
         };
 
         let init_segment =

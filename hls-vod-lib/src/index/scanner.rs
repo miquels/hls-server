@@ -21,19 +21,17 @@ use super::{analyze_audio_stream, analyze_subtitle_stream, analyze_video_stream}
 pub struct IndexOptions {
     /// Target segment duration in seconds
     pub segment_duration_secs: f64,
+    /// Whether to read demuxer indexes and calculate segment boundaries
+    pub index_segments: bool,
 }
 
 impl Default for IndexOptions {
     fn default() -> Self {
         Self {
             segment_duration_secs: 4.0,
+            index_segments: true,
         }
     }
-}
-
-/// Scan a media file and extract all metadata
-pub fn scan_file<P: AsRef<Path>>(path: P) -> Result<StreamIndex> {
-    scan_file_with_options(path, &IndexOptions::default())
 }
 
 /// Scan a media file with custom options.
@@ -99,6 +97,18 @@ pub fn scan_file_with_options<P: AsRef<Path>>(
 
     if index.video_streams.is_empty() {
         return Err(HlsError::NoVideoStream);
+    }
+
+    if !options.index_segments {
+        tracing::info!(
+            "Parsed metadata for {:?}: duration={:.2}s, video={}, audio={}, subtitles={} (indexing skipped)",
+            path,
+            index.duration_secs,
+            index.video_streams.len(),
+            index.audio_streams.len(),
+            index.subtitle_streams.len()
+        );
+        return Ok(index);
     }
 
     // --- Build everything from the demuxer index tables ---
@@ -252,6 +262,10 @@ pub fn scan_file_with_options<P: AsRef<Path>>(
         index.subtitle_streams.len(),
         index.segments.len()
     );
+
+    if options.index_segments {
+        index.cached_context = Some(std::sync::Arc::new(std::sync::Mutex::new(context)));
+    }
 
     Ok(index)
 }

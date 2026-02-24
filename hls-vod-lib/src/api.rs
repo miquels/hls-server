@@ -26,18 +26,8 @@ pub struct MediaInfo {
     pub cache_enabled: bool,
 }
 
-static STREAMS_BY_PATH: std::sync::OnceLock<dashmap::DashMap<String, std::sync::Arc<MediaInfo>>> =
-    std::sync::OnceLock::new();
 static STREAMS_BY_ID: std::sync::OnceLock<dashmap::DashMap<String, std::sync::Arc<MediaInfo>>> =
     std::sync::OnceLock::new();
-
-/// Retrieve a tracked media stream by its absolute file path
-pub(crate) fn get_stream_by_path(path: &str) -> Option<std::sync::Arc<MediaInfo>> {
-    STREAMS_BY_PATH
-        .get_or_init(dashmap::DashMap::new)
-        .get(path)
-        .map(|r| r.value().clone())
-}
 
 /// Retrieve a tracked media stream by its generated stream ID
 pub(crate) fn get_stream_by_id(stream_id: &str) -> Option<std::sync::Arc<MediaInfo>> {
@@ -49,13 +39,10 @@ pub(crate) fn get_stream_by_id(stream_id: &str) -> Option<std::sync::Arc<MediaIn
 
 /// Remove a tracked media stream by its generated stream ID
 pub(crate) fn remove_stream_by_id(stream_id: &str) {
-    if let Some(media) = STREAMS_BY_ID
+    if let Some(_media) = STREAMS_BY_ID
         .get_or_init(dashmap::DashMap::new)
         .remove(stream_id)
     {
-        STREAMS_BY_PATH
-            .get_or_init(dashmap::DashMap::new)
-            .remove(&media.1.index.source_path.to_string_lossy().to_string());
         if let Some(c) = crate::cache::global_cache() {
             c.remove_stream(stream_id);
         }
@@ -109,9 +96,6 @@ pub fn register_test_stream(media: std::sync::Arc<MediaInfo>) {
     STREAMS_BY_ID
         .get_or_init(dashmap::DashMap::new)
         .insert(media.index.stream_id.clone(), media.clone());
-    STREAMS_BY_PATH
-        .get_or_init(dashmap::DashMap::new)
-        .insert(media.index.source_path.to_string_lossy().to_string(), media);
 }
 
 /// Description of the media track available to the client.
@@ -142,307 +126,317 @@ pub enum TrackType {
     Subtitle { format: String },
 }
 
-/// Parse a media file and return its generated `stream_id`.
-/// Scans the file using FFmpeg to identify streams, validate codecs, and generate internal segment indexes.
-pub fn parse_file(path: &Path, cache: bool) -> Result<String> {
-    let path_str = path.to_string_lossy().to_string();
+impl MediaInfo {
+    /// Parse a media file quickly without segment indexing or caching.
+    /// Useful for getting basic track info and duration.
+    pub fn parse(path: &Path) -> Result<MediaInfo> {
+        let options = scanner::IndexOptions {
+            segment_duration_secs: 4.0,
+            index_segments: false,
+        };
+        let index = scanner::scan_file_with_options(path, &options)?;
+        Ok(Self::build_media_info(path, index, false))
+    }
 
-    if let Some(media) = get_stream_by_path(&path_str) {
-        if cache {
-            media.index.touch();
+    /// Open a media file, performing full segment indexing.
+    /// Uses `stream_id` for caching if provided, otherwise generates a new one.
+    pub fn open(path: &Path, stream_id: Option<String>) -> Result<std::sync::Arc<MediaInfo>> {
+        if let Some(id) = &stream_id {
+            if let Some(media) = get_stream_by_id(id) {
+                media.index.touch();
+                return Ok(media);
+            }
         }
-        return Ok(media.index.stream_id.clone());
-    }
 
-    let index = scanner::scan_file(path)?;
+        let options = scanner::IndexOptions {
+            segment_duration_secs: 4.0,
+            index_segments: true,
+        };
+        let mut index = scanner::scan_file_with_options(path, &options)?;
 
-    let mut tracks = Vec::new();
+        if let Some(id) = stream_id {
+            index.stream_id = id;
+        }
 
-    // Video tracks
-    for v in &index.video_streams {
-        tracks.push(TrackInfo {
-            id: format!("v/{}", v.stream_index),
-            track_type: TrackType::Video {
-                width: v.width,
-                height: v.height,
-            },
-            codec_id: format!("{:?}", v.codec_id),
-            language: v.language.clone(),
-            bitrate: Some(v.bitrate),
-            transcode_to: None,
-        });
-    }
+        let media = std::sync::Arc::new(Self::build_media_info(path, index, true));
 
-    // Audio tracks
-    for a in &index.audio_streams {
-        tracks.push(TrackInfo {
-            id: format!("a/{}", a.stream_index),
-            track_type: TrackType::Audio {
-                channels: a.channels,
-                sample_rate: a.sample_rate,
-            },
-            codec_id: format!("{:?}", a.codec_id),
-            language: a.language.clone(),
-            bitrate: Some(a.bitrate),
-            transcode_to: None,
-        });
-    }
-
-    // Subtitle tracks
-    for s in &index.subtitle_streams {
-        tracks.push(TrackInfo {
-            id: format!("s/{}", s.stream_index),
-            track_type: TrackType::Subtitle {
-                format: format!("{:?}", s.format),
-            },
-            codec_id: format!("{:?}", s.codec_id),
-            language: s.language.clone(),
-            bitrate: None,
-            transcode_to: None,
-        });
-    }
-
-    let file_size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-
-    let media = std::sync::Arc::new(MediaInfo {
-        file_size,
-        duration_secs: index.duration_secs,
-        video_timebase: index.video_timebase,
-        tracks,
-        index,
-        cache_enabled: cache,
-    });
-
-    if cache {
         STREAMS_BY_ID
             .get_or_init(dashmap::DashMap::new)
             .insert(media.index.stream_id.clone(), media.clone());
-        STREAMS_BY_PATH
-            .get_or_init(dashmap::DashMap::new)
-            .insert(path_str, media.clone());
+
+        Ok(media)
     }
 
-    Ok(media.index.stream_id.clone())
-}
+    fn build_media_info(path: &Path, index: StreamIndex, cache: bool) -> Self {
+        let mut tracks = Vec::new();
 
-/// Generate the master playlist (m3u8).
-/// Returns a multi-variant HLS playlist that directs clients to specific audio/video tracks.
-pub fn generate_main_playlist(stream_id: &str, prefix: &str) -> Result<String> {
-    let media = get_stream_by_id(stream_id)
-        .ok_or_else(|| crate::error::HlsError::StreamNotFound(stream_id.to_string()))?;
-    Ok(generate_master_playlist(&media.index, prefix))
-}
-
-/// Generate a variant track playlist.
-/// Returns a media playlist that lists available segments for the track specified by `playlist_id`.
-pub fn generate_track_playlist(stream_id: &str, playlist_id: &str) -> Result<String> {
-    let media = get_stream_by_id(stream_id)
-        .ok_or_else(|| crate::error::HlsError::StreamNotFound(stream_id.to_string()))?;
-
-    if playlist_id == "v/media.m3u8" {
-        return Ok(variant::generate_video_playlist(&media.index));
-    }
-
-    if let Some(caps) = regex::Regex::new(r"a/(\d+)(?:-aac)?(?:/media)?\.m3u8")
-        .unwrap()
-        .captures(playlist_id)
-    {
-        let id_idx: usize = caps[1]
-            .parse()
-            .map_err(|_| crate::error::HlsError::Muxing("Invalid audio ID".to_string()))?;
-        let force_aac = playlist_id.contains("-aac");
-        return Ok(variant::generate_audio_playlist(
-            &media.index,
-            id_idx,
-            force_aac,
-        ));
-    }
-
-    if let Some(caps) = regex::Regex::new(r"s/(\d+)(?:/media)?\.m3u8")
-        .unwrap()
-        .captures(playlist_id)
-    {
-        let id_idx: usize = caps[1]
-            .parse()
-            .map_err(|_| crate::error::HlsError::Muxing("Invalid subtitle ID".to_string()))?;
-        return Ok(variant::generate_subtitle_playlist(&media.index, id_idx));
-    }
-
-    Err(crate::error::HlsError::Muxing(format!(
-        "Invalid playlist ID: {}",
-        playlist_id
-    )))
-}
-
-/// Generate a media segment.
-/// Uses the provided `segment_id` (e.g. `v/init.mp4` or `a/1/0.m4s`) to determine whether an initialization segment
-/// or a media segment should be remuxed/transcoded and returned as bytes.
-pub fn generate_segment(stream_id: &str, segment_id: &str) -> Result<Vec<u8>> {
-    let media = get_stream_by_id(stream_id)
-        .ok_or_else(|| crate::error::HlsError::StreamNotFound(stream_id.to_string()))?;
-
-    // Handle init segments
-    if segment_id == "v/init.mp4" {
-        return generator::generate_video_init_segment(&media.index).map(|b| b.to_vec());
-    }
-
-    if let Some(caps) = regex::Regex::new(r"a/(\d+)(?:-aac)?/init\.mp4")
-        .unwrap()
-        .captures(segment_id)
-    {
-        let id_idx: usize = caps[1]
-            .parse()
-            .map_err(|_| crate::error::HlsError::Muxing("Invalid audio ID".to_string()))?;
-        let force_aac = segment_id.contains("-aac");
-        return generator::generate_audio_init_segment(&media.index, id_idx, force_aac)
-            .map(|b| b.to_vec());
-    }
-
-    // Handle media segments (.m4s, .vtt)
-    if let Some(caps) = regex::Regex::new(r"v/(\d+)\.m4s")
-        .unwrap()
-        .captures(segment_id)
-    {
-        let seq: usize = caps[1]
-            .parse()
-            .map_err(|_| crate::error::HlsError::Muxing("Invalid sequence".to_string()))?;
-
-        if let Some(c) = crate::cache::global_cache() {
-            if let Some(b) = c.get(&media.index.stream_id, "v", seq, media.cache_enabled) {
-                return Ok(b.to_vec());
-            }
+        // Video tracks
+        for v in &index.video_streams {
+            tracks.push(TrackInfo {
+                id: format!("v/{}", v.stream_index),
+                track_type: TrackType::Video {
+                    width: v.width,
+                    height: v.height,
+                },
+                codec_id: format!("{:?}", v.codec_id),
+                language: v.language.clone(),
+                bitrate: Some(v.bitrate),
+                transcode_to: None,
+            });
         }
 
-        let track_idx = media
-            .index
-            .video_streams
-            .first()
-            .map(|v| v.stream_index)
-            .unwrap_or(0);
-        let buf = generator::generate_video_segment(
-            &media.index,
-            track_idx,
-            seq,
-            &media.index.source_path,
-        )
-        .map(|b| b.to_vec())?;
+        // Audio tracks
+        for a in &index.audio_streams {
+            tracks.push(TrackInfo {
+                id: format!("a/{}", a.stream_index),
+                track_type: TrackType::Audio {
+                    channels: a.channels,
+                    sample_rate: a.sample_rate,
+                },
+                codec_id: format!("{:?}", a.codec_id),
+                language: a.language.clone(),
+                bitrate: Some(a.bitrate),
+                transcode_to: None,
+            });
+        }
 
-        if media.cache_enabled {
+        // Subtitle tracks
+        for s in &index.subtitle_streams {
+            tracks.push(TrackInfo {
+                id: format!("s/{}", s.stream_index),
+                track_type: TrackType::Subtitle {
+                    format: format!("{:?}", s.format),
+                },
+                codec_id: format!("{:?}", s.codec_id),
+                language: s.language.clone(),
+                bitrate: None,
+                transcode_to: None,
+            });
+        }
+
+        let file_size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+
+        Self {
+            file_size,
+            duration_secs: index.duration_secs,
+            video_timebase: index.video_timebase,
+            tracks,
+            index,
+            cache_enabled: cache,
+        }
+    }
+
+    /// Generate the master playlist (m3u8).
+    /// Returns a multi-variant HLS playlist that directs clients to specific audio/video tracks.
+    pub fn generate_main_playlist(&self, prefix: &str) -> Result<String> {
+        Ok(generate_master_playlist(&self.index, prefix))
+    }
+
+    /// Generate a variant track playlist.
+    /// Returns a media playlist that lists available segments for the track specified by `playlist_id`.
+    pub fn generate_track_playlist(&self, playlist_id: &str) -> Result<String> {
+        if playlist_id == "v/media.m3u8" {
+            return Ok(variant::generate_video_playlist(&self.index));
+        }
+
+        if let Some(caps) = regex::Regex::new(r"a/(\d+)(?:-aac)?(?:/media)?\.m3u8")
+            .unwrap()
+            .captures(playlist_id)
+        {
+            let id_idx: usize = caps[1]
+                .parse()
+                .map_err(|_| crate::error::HlsError::Muxing("Invalid audio ID".to_string()))?;
+            let force_aac = playlist_id.contains("-aac");
+            return Ok(variant::generate_audio_playlist(
+                &self.index,
+                id_idx,
+                force_aac,
+            ));
+        }
+
+        if let Some(caps) = regex::Regex::new(r"s/(\d+)(?:/media)?\.m3u8")
+            .unwrap()
+            .captures(playlist_id)
+        {
+            let id_idx: usize = caps[1]
+                .parse()
+                .map_err(|_| crate::error::HlsError::Muxing("Invalid subtitle ID".to_string()))?;
+            return Ok(variant::generate_subtitle_playlist(&self.index, id_idx));
+        }
+
+        Err(crate::error::HlsError::Muxing(format!(
+            "Invalid playlist ID: {}",
+            playlist_id
+        )))
+    }
+
+    /// Generate a media segment.
+    /// Uses the provided `segment_id` (e.g. `v/init.mp4` or `a/1/0.m4s`) to determine whether an initialization segment
+    /// or a media segment should be remuxed/transcoded and returned as bytes.
+    pub fn generate_segment(&self, segment_id: &str) -> Result<Vec<u8>> {
+        // Handle init segments
+        if segment_id == "v/init.mp4" {
+            return generator::generate_video_init_segment(&self.index).map(|b| b.to_vec());
+        }
+
+        if let Some(caps) = regex::Regex::new(r"a/(\d+)(?:-aac)?/init\.mp4")
+            .unwrap()
+            .captures(segment_id)
+        {
+            let id_idx: usize = caps[1]
+                .parse()
+                .map_err(|_| crate::error::HlsError::Muxing("Invalid audio ID".to_string()))?;
+            let force_aac = segment_id.contains("-aac");
+            return generator::generate_audio_init_segment(&self.index, id_idx, force_aac)
+                .map(|b| b.to_vec());
+        }
+
+        // Handle media segments (.m4s, .vtt)
+        if let Some(caps) = regex::Regex::new(r"v/(\d+)\.m4s")
+            .unwrap()
+            .captures(segment_id)
+        {
+            let seq: usize = caps[1]
+                .parse()
+                .map_err(|_| crate::error::HlsError::Muxing("Invalid sequence".to_string()))?;
+
             if let Some(c) = crate::cache::global_cache() {
-                c.insert(
-                    &media.index.stream_id,
-                    "v",
-                    seq,
-                    bytes::Bytes::from(buf.clone()),
-                );
+                if let Some(b) = c.get(&self.index.stream_id, "v", seq, self.cache_enabled) {
+                    return Ok(b.to_vec());
+                }
             }
-        }
-        return Ok(buf);
-    }
 
-    if let Some(caps) = regex::Regex::new(r"a/(\d+)(?:-aac)?/(\d+)\.m4s")
-        .unwrap()
-        .captures(segment_id)
-    {
-        let id_idx: usize = caps[1]
-            .parse()
-            .map_err(|_| crate::error::HlsError::Muxing("Invalid audio ID".to_string()))?;
-        let seq: usize = caps[2]
-            .parse()
-            .map_err(|_| crate::error::HlsError::Muxing("Invalid sequence".to_string()))?;
-        let force_aac = segment_id.contains("-aac");
-
-        let segment_type = if force_aac {
-            format!("a:{}-aac", id_idx)
-        } else {
-            format!("a:{}", id_idx)
-        };
-
-        if let Some(c) = crate::cache::global_cache() {
-            if let Some(b) = c.get(
-                &media.index.stream_id,
-                &segment_type,
+            let track_idx = self
+                .index
+                .video_streams
+                .first()
+                .map(|v| v.stream_index)
+                .unwrap_or(0);
+            let buf = generator::generate_video_segment(
+                &self.index,
+                track_idx,
                 seq,
-                media.cache_enabled,
-            ) {
-                return Ok(b.to_vec());
+                &self.index.source_path,
+            )
+            .map(|b| b.to_vec())?;
+
+            if self.cache_enabled {
+                if let Some(c) = crate::cache::global_cache() {
+                    c.insert(
+                        &self.index.stream_id,
+                        "v",
+                        seq,
+                        bytes::Bytes::from(buf.clone()),
+                    );
+                }
             }
+            return Ok(buf);
         }
 
-        let buf = generator::generate_audio_segment(
-            &media.index,
-            id_idx,
-            seq,
-            &media.index.source_path,
-            force_aac,
-        )
-        .map(|b| b.to_vec())?;
+        if let Some(caps) = regex::Regex::new(r"a/(\d+)(?:-aac)?/(\d+)\.m4s")
+            .unwrap()
+            .captures(segment_id)
+        {
+            let id_idx: usize = caps[1]
+                .parse()
+                .map_err(|_| crate::error::HlsError::Muxing("Invalid audio ID".to_string()))?;
+            let seq: usize = caps[2]
+                .parse()
+                .map_err(|_| crate::error::HlsError::Muxing("Invalid sequence".to_string()))?;
+            let force_aac = segment_id.contains("-aac");
 
-        if media.cache_enabled {
+            let segment_type = if force_aac {
+                format!("a:{}-aac", id_idx)
+            } else {
+                format!("a:{}", id_idx)
+            };
+
             if let Some(c) = crate::cache::global_cache() {
-                c.insert(
-                    &media.index.stream_id,
+                if let Some(b) = c.get(
+                    &self.index.stream_id,
                     &segment_type,
                     seq,
-                    bytes::Bytes::from(buf.clone()),
-                );
+                    self.cache_enabled,
+                ) {
+                    return Ok(b.to_vec());
+                }
             }
-        }
-        return Ok(buf);
-    }
 
-    if let Some(caps) = regex::Regex::new(r"s/(\d+)/(\d+)-(\d+)\.vtt")
-        .unwrap()
-        .captures(segment_id)
-    {
-        let id_idx: usize = caps[1]
-            .parse()
-            .map_err(|_| crate::error::HlsError::Muxing("Invalid subtitle ID".to_string()))?;
-        let start_seq: usize = caps[2]
-            .parse()
-            .map_err(|_| crate::error::HlsError::Muxing("Invalid start seq".to_string()))?;
-        let end_seq: usize = caps[3]
-            .parse()
-            .map_err(|_| crate::error::HlsError::Muxing("Invalid end seq".to_string()))?;
+            let buf = generator::generate_audio_segment(
+                &self.index,
+                id_idx,
+                seq,
+                &self.index.source_path,
+                force_aac,
+            )
+            .map(|b| b.to_vec())?;
 
-        // Subtitles spans multiple sequences in formatting, we use start_seq as cache sequence map
-        let segment_type = format!("s:{}", id_idx);
-
-        if let Some(c) = crate::cache::global_cache() {
-            if let Some(b) = c.get(
-                &media.index.stream_id,
-                &segment_type,
-                start_seq,
-                media.cache_enabled,
-            ) {
-                return Ok(b.to_vec());
+            if self.cache_enabled {
+                if let Some(c) = crate::cache::global_cache() {
+                    c.insert(
+                        &self.index.stream_id,
+                        &segment_type,
+                        seq,
+                        bytes::Bytes::from(buf.clone()),
+                    );
+                }
             }
+            return Ok(buf);
         }
 
-        let buf = generator::generate_subtitle_segment(
-            &media.index,
-            id_idx,
-            start_seq,
-            end_seq,
-            &media.index.source_path,
-        )
-        .map(|b| b.to_vec())?;
+        if let Some(caps) = regex::Regex::new(r"s/(\d+)/(\d+)-(\d+)\.vtt")
+            .unwrap()
+            .captures(segment_id)
+        {
+            let id_idx: usize = caps[1]
+                .parse()
+                .map_err(|_| crate::error::HlsError::Muxing("Invalid subtitle ID".to_string()))?;
+            let start_seq: usize = caps[2]
+                .parse()
+                .map_err(|_| crate::error::HlsError::Muxing("Invalid start seq".to_string()))?;
+            let end_seq: usize = caps[3]
+                .parse()
+                .map_err(|_| crate::error::HlsError::Muxing("Invalid end seq".to_string()))?;
 
-        if media.cache_enabled {
+            // Subtitles spans multiple sequences in formatting, we use start_seq as cache sequence map
+            let segment_type = format!("s:{}", id_idx);
+
             if let Some(c) = crate::cache::global_cache() {
-                c.insert(
-                    &media.index.stream_id,
+                if let Some(b) = c.get(
+                    &self.index.stream_id,
                     &segment_type,
                     start_seq,
-                    bytes::Bytes::from(buf.clone()),
-                );
+                    self.cache_enabled,
+                ) {
+                    return Ok(b.to_vec());
+                }
             }
-        }
-        return Ok(buf);
-    }
 
-    Err(crate::error::HlsError::Muxing(format!(
-        "Invalid segment ID: {}",
-        segment_id
-    )))
+            let buf = generator::generate_subtitle_segment(
+                &self.index,
+                id_idx,
+                start_seq,
+                end_seq,
+                &self.index.source_path,
+            )
+            .map(|b| b.to_vec())?;
+
+            if self.cache_enabled {
+                if let Some(c) = crate::cache::global_cache() {
+                    c.insert(
+                        &self.index.stream_id,
+                        &segment_type,
+                        start_seq,
+                        bytes::Bytes::from(buf.clone()),
+                    );
+                }
+            }
+            return Ok(buf);
+        }
+
+        Err(crate::error::HlsError::Muxing(format!(
+            "Invalid segment ID: {}",
+            segment_id
+        )))
+    }
 }

@@ -31,6 +31,7 @@ mod tests {
             indexed_at: std::time::SystemTime::now(),
             last_accessed: AtomicU64::new(0),
             segment_first_pts: Arc::new(Vec::new()),
+            cached_context: None,
         };
 
         let segment = SegmentInfo {

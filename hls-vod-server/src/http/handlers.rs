@@ -62,10 +62,10 @@ pub async fn version_check() -> Json<serde_json::Value> {
 /// Master playlist logic
 pub async fn master_playlist(
     state: &AppState,
-    stream_id: &str,
+    media: &std::sync::Arc<hls_vod_lib::MediaInfo>,
     prefix: &str,
 ) -> Result<Response, HttpError> {
-    let playlist = hls_vod_lib::generate_main_playlist(stream_id, prefix)?;
+    let playlist = media.generate_main_playlist(prefix)?;
 
     let mut headers = HeaderMap::new();
     headers.insert(
@@ -79,9 +79,12 @@ pub async fn master_playlist(
 
 /// Video variant playlist endpoint
 /// Video variant playlist logic
-pub async fn video_playlist(state: &AppState, stream_id: &str) -> Result<Response, HttpError> {
+pub async fn video_playlist(
+    state: &AppState,
+    media: &std::sync::Arc<hls_vod_lib::MediaInfo>,
+) -> Result<Response, HttpError> {
     let playlist_id = "v/media.m3u8";
-    let playlist = hls_vod_lib::generate_track_playlist(stream_id, playlist_id)?;
+    let playlist = media.generate_track_playlist(playlist_id)?;
 
     let mut headers = HeaderMap::new();
     headers.insert(
@@ -97,13 +100,13 @@ pub async fn video_playlist(state: &AppState, stream_id: &str) -> Result<Respons
 /// Audio variant playlist logic
 pub async fn audio_playlist(
     state: &AppState,
-    stream_id: &str,
+    media: &std::sync::Arc<hls_vod_lib::MediaInfo>,
     track_index: usize,
     force_aac: bool,
 ) -> Result<Response, HttpError> {
     let suffix = if force_aac { "-aac" } else { "" };
     let playlist_id = format!("a/{}{}/media.m3u8", track_index, suffix);
-    let playlist = hls_vod_lib::generate_track_playlist(stream_id, &playlist_id)?;
+    let playlist = media.generate_track_playlist(&playlist_id)?;
 
     let mut headers = HeaderMap::new();
     headers.insert(
@@ -119,11 +122,11 @@ pub async fn audio_playlist(
 /// Subtitle variant playlist logic
 pub async fn subtitle_playlist(
     state: &AppState,
-    stream_id: &str,
+    media: &std::sync::Arc<hls_vod_lib::MediaInfo>,
     track_index: usize,
 ) -> Result<Response, HttpError> {
     let playlist_id = format!("s/{}/media.m3u8", track_index);
-    let playlist = hls_vod_lib::generate_track_playlist(stream_id, &playlist_id)?;
+    let playlist = media.generate_track_playlist(&playlist_id)?;
 
     let mut headers = HeaderMap::new();
     headers.insert(
@@ -137,9 +140,12 @@ pub async fn subtitle_playlist(
 
 /// Video init segment endpoint (video track only)
 /// Video init segment logic
-pub async fn video_init_segment(state: &AppState, stream_id: &str) -> Result<Response, HttpError> {
+pub async fn video_init_segment(
+    state: &AppState,
+    media: &std::sync::Arc<hls_vod_lib::MediaInfo>,
+) -> Result<Response, HttpError> {
     let segment_id = "v/init.mp4";
-    let bytes = hls_vod_lib::generate_segment(stream_id, segment_id)?;
+    let bytes = media.generate_segment(segment_id)?;
 
     let mut headers = HeaderMap::new();
     headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("video/mp4"));
@@ -155,13 +161,13 @@ pub async fn video_init_segment(state: &AppState, stream_id: &str) -> Result<Res
 /// Audio init segment logic
 pub async fn audio_init_segment(
     state: &AppState,
-    stream_id: &str,
+    media: &std::sync::Arc<hls_vod_lib::MediaInfo>,
     track_index: usize,
     force_aac: bool,
 ) -> Result<Response, HttpError> {
     let suffix = if force_aac { "-aac" } else { "" };
     let segment_id = format!("a/{}{}/init.mp4", track_index, suffix);
-    let bytes = hls_vod_lib::generate_segment(stream_id, &segment_id)?;
+    let bytes = media.generate_segment(&segment_id)?;
 
     let mut headers = HeaderMap::new();
     headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("video/mp4"));
@@ -177,11 +183,11 @@ pub async fn audio_init_segment(
 /// Video media segment logic
 pub async fn video_segment(
     state: &AppState,
-    stream_id: &str,
+    media: &std::sync::Arc<hls_vod_lib::MediaInfo>,
     sequence: usize,
 ) -> Result<Response, HttpError> {
     let segment_id = format!("v/{}.m4s", sequence);
-    let bytes = hls_vod_lib::generate_segment(stream_id, &segment_id)?;
+    let bytes = media.generate_segment(&segment_id)?;
 
     let mut headers = HeaderMap::new();
     headers.insert(
@@ -200,14 +206,14 @@ pub async fn video_segment(
 /// Audio media segment logic
 pub async fn audio_segment(
     state: &AppState,
-    stream_id: &str,
+    media: &std::sync::Arc<hls_vod_lib::MediaInfo>,
     track_index: usize,
     sequence: usize,
     force_aac: bool,
 ) -> Result<Response, HttpError> {
     let suffix = if force_aac { "-aac" } else { "" };
     let segment_id = format!("a/{}{}/{}.m4s", track_index, suffix, sequence);
-    let bytes = hls_vod_lib::generate_segment(stream_id, &segment_id)?;
+    let bytes = media.generate_segment(&segment_id)?;
 
     let mut headers = HeaderMap::new();
     headers.insert(
@@ -226,14 +232,14 @@ pub async fn audio_segment(
 /// Subtitle media segment logic
 pub async fn subtitle_segment(
     state: &AppState,
-    stream_id: &str,
+    media: &std::sync::Arc<hls_vod_lib::MediaInfo>,
     track_index: usize,
     start_seq: usize,
     end_seq: usize,
 ) -> Result<Response, HttpError> {
     let segment_id = format!("s/{}/{}-{}.vtt", track_index, start_seq, end_seq);
 
-    let bytes = hls_vod_lib::generate_segment(stream_id, &segment_id)?;
+    let bytes = media.generate_segment(&segment_id)?;
 
     let mut headers = HeaderMap::new();
     headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("text/vtt"));
