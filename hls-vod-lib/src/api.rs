@@ -243,7 +243,7 @@ pub fn generate_track_playlist(stream_id: &str, playlist_id: &str) -> Result<Str
         return Ok(variant::generate_video_playlist(&media.index));
     }
 
-    if let Some(caps) = regex::Regex::new(r"a/(\d+)(?:-aac)?\.m3u8")
+    if let Some(caps) = regex::Regex::new(r"a/(\d+)(?:-aac)?(?:/media)?\.m3u8")
         .unwrap()
         .captures(playlist_id)
     {
@@ -258,7 +258,7 @@ pub fn generate_track_playlist(stream_id: &str, playlist_id: &str) -> Result<Str
         ));
     }
 
-    if let Some(caps) = regex::Regex::new(r"s/(\d+)\.m3u8")
+    if let Some(caps) = regex::Regex::new(r"s/(\d+)(?:/media)?\.m3u8")
         .unwrap()
         .captures(playlist_id)
     {

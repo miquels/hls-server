@@ -168,51 +168,13 @@ pub(crate) fn generate_audio_init_segment(
 /// Fix default_sample_duration in trex boxes
 /// FFmpeg with stream copy sets duration to 1, but players need reasonable values
 fn fix_trex_durations(data: &mut Vec<u8>, duration: u32) {
-    // Find mvex box
-    let mvex_pos = match data.windows(4).position(|w| w == b"mvex") {
-        Some(pos) => pos,
-        None => return,
-    };
-
-    if mvex_pos < 4 {
-        return;
-    }
-
-    let mvex_start = mvex_pos - 4;
-    let mvex_size = u32::from_be_bytes([
-        data[mvex_start],
-        data[mvex_start + 1],
-        data[mvex_start + 2],
-        data[mvex_start + 3],
-    ]) as usize;
-
-    let mvex_end = mvex_start + mvex_size;
-
-    if mvex_end > data.len() {
-        return;
-    }
-
-    // Find trex boxes inside mvex
-    // mvex header is 8 bytes (Size, Type). No flags.
-    let mut pos = mvex_pos + 4;
-
-    while pos + 8 <= mvex_end {
-        let size =
-            u32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
-
-        if size < 8 || pos + size > mvex_end {
-            break;
+    crate::segment::isobmff::walk_boxes_mut(data, &[b"moov", b"mvex"], &mut |btype, payload| {
+        if btype == b"trex" && payload.len() >= 16 {
+            // Set default_sample_duration (offset 16 from start of payload, which is pos + 24 from start of box)
+            // Wait, in the original code, it was offset 20 from pos. payload starts at pos + 8. So it's offset 12 in payload.
+            payload[12..16].copy_from_slice(&duration.to_be_bytes());
         }
-
-        if data[pos + 4..pos + 8] == *b"trex" {
-            // Set default_sample_duration (offset 20)
-            if size >= 24 {
-                data[pos + 20..pos + 24].copy_from_slice(&duration.to_be_bytes());
-            }
-        }
-
-        pos += size;
-    }
+    });
 }
 
 /// Patch tfdt.baseMediaDecodeTime and mfhd.FragmentSequenceNumber in media segment data.
@@ -222,90 +184,51 @@ fn fix_trex_durations(data: &mut Vec<u8>, duration: u32) {
 /// multi-fragment segments). Also patches mfhd sequence numbers starting from
 /// `start_frag_seq`.
 fn patch_tfdts(media_data: &mut Vec<u8>, target_time: u64, start_frag_seq: u32) {
-    let mut pos = 0;
     let mut tfdt_delta: Option<i64> = None;
     let mut frag_count = 0;
 
-    while pos + 8 <= media_data.len() {
-        let size = u32::from_be_bytes(media_data[pos..pos + 4].try_into().unwrap()) as usize;
-        if size == 0 {
-            break;
-        }
-        if &media_data[pos + 4..pos + 8] == b"moof" {
-            let moof_end = (pos + size).min(media_data.len());
-            let mut moof_pos = pos + 8;
-            let current_frag_seq = start_frag_seq.wrapping_add(frag_count);
-            frag_count += 1;
-
-            while moof_pos + 8 <= moof_end {
-                let child_size =
-                    u32::from_be_bytes(media_data[moof_pos..moof_pos + 4].try_into().unwrap())
-                        as usize;
-                if child_size == 0 {
-                    break;
+    crate::segment::isobmff::walk_boxes_mut(
+        media_data,
+        &[b"moof", b"traf"],
+        &mut |btype, payload| {
+            if btype == b"moof" {
+                // moof is a container, nothing to mutate directly here.
+            } else if btype == b"mfhd" {
+                let current_frag_seq = start_frag_seq.wrapping_add(frag_count);
+                frag_count += 1;
+                if payload.len() >= 8 {
+                    payload[4..8].copy_from_slice(&current_frag_seq.to_be_bytes());
                 }
-                if &media_data[moof_pos + 4..moof_pos + 8] == b"mfhd" {
-                    if moof_pos + 16 <= media_data.len() {
-                        media_data[moof_pos + 12..moof_pos + 16]
-                            .copy_from_slice(&current_frag_seq.to_be_bytes());
-                    }
-                } else if &media_data[moof_pos + 4..moof_pos + 8] == b"traf" {
-                    let traf_end = (moof_pos + child_size).min(moof_end);
-                    let mut traf_pos = moof_pos + 8;
-                    while traf_pos + 8 <= traf_end {
-                        let sub_size = u32::from_be_bytes(
-                            media_data[traf_pos..traf_pos + 4].try_into().unwrap(),
-                        ) as usize;
-                        if sub_size == 0 {
-                            break;
-                        }
-                        if &media_data[traf_pos + 4..traf_pos + 8] == b"tfdt" {
-                            let version = media_data[traf_pos + 8];
-                            let (current_tfdt, value_offset) =
-                                if version == 1 && traf_pos + 20 <= media_data.len() {
-                                    (
-                                        u64::from_be_bytes(
-                                            media_data[traf_pos + 12..traf_pos + 20]
-                                                .try_into()
-                                                .unwrap(),
-                                        ),
-                                        12,
-                                    )
-                                } else if traf_pos + 16 <= media_data.len() {
-                                    (
-                                        u32::from_be_bytes(
-                                            media_data[traf_pos + 12..traf_pos + 16]
-                                                .try_into()
-                                                .unwrap(),
-                                        ) as u64,
-                                        12,
-                                    )
-                                } else {
-                                    (0, 0)
-                                };
+            } else if btype == b"tfdt" {
+                if payload.is_empty() {
+                    return;
+                }
+                let version = payload[0];
+                let (current_tfdt, value_offset) = if version == 1 && payload.len() >= 12 {
+                    (u64::from_be_bytes(payload[4..12].try_into().unwrap()), 4)
+                } else if payload.len() >= 8 {
+                    (
+                        u32::from_be_bytes(payload[4..8].try_into().unwrap()) as u64,
+                        4,
+                    )
+                } else {
+                    (0, 0)
+                };
 
-                            if value_offset > 0 {
-                                if tfdt_delta.is_none() {
-                                    tfdt_delta = Some(target_time as i64 - current_tfdt as i64);
-                                }
-                                let new_tfdt = (current_tfdt as i64 + tfdt_delta.unwrap()) as u64;
-                                if version == 1 {
-                                    media_data[traf_pos + 12..traf_pos + 20]
-                                        .copy_from_slice(&new_tfdt.to_be_bytes());
-                                } else {
-                                    media_data[traf_pos + 12..traf_pos + 16]
-                                        .copy_from_slice(&(new_tfdt as u32).to_be_bytes());
-                                }
-                            }
-                        }
-                        traf_pos += sub_size;
+                if value_offset > 0 {
+                    if tfdt_delta.is_none() {
+                        tfdt_delta = Some(target_time as i64 - current_tfdt as i64);
+                    }
+                    let new_tfdt = (current_tfdt as i64 + tfdt_delta.unwrap()) as u64;
+                    if version == 1 {
+                        payload[4..12].copy_from_slice(&new_tfdt.to_be_bytes());
+                    } else {
+                        payload[4..8].copy_from_slice(&(new_tfdt as u32).to_be_bytes());
                     }
                 }
-                moof_pos += child_size;
             }
-        }
-        pos += size;
-    }
+        },
+    );
 }
 
 /// Generate a video segment
@@ -449,11 +372,12 @@ fn generate_transcoded_audio_segment(
         (exact_target / grid_size) * grid_size
     };
 
-    patch_tfdts(
-        &mut media_data,
-        target_time,
-        (segment.sequence as u32).wrapping_add(1),
-    );
+    // Use a large multiplier for fragment sequence numbers to ensure they are
+    // monotonically increasing and unique across ALL segments and fragments.
+    // Each segment is allocated 1000 IDs, which is plenty for typical segment lengths.
+    let start_frag_seq = (segment.sequence as u32).wrapping_mul(1000).wrapping_add(1);
+
+    patch_tfdts(&mut media_data, target_time, start_frag_seq);
 
     Ok(Bytes::from(media_data))
 }
@@ -673,110 +597,97 @@ pub(crate) fn generate_subtitle_segment(
 /// Parse the minimum display PTS across all samples in a muxed fMP4 segment.
 /// Scans every moof/traf/tfdt/trun box and returns the smallest (tfdt + sample_CT) value.
 /// This is the earliest frame display time, used to align audio tfdt.
-fn read_first_display_pts(data: &[u8]) -> Option<i64> {
-    let mut min_pts: Option<i64> = None;
-    let mut pos = 0;
+pub fn read_first_display_pts(data: &[u8]) -> Option<i64> {
+    let mut first_display_pts: Option<i64> = None;
+    let mut current_tfdt: Option<i64> = None;
 
-    while pos + 8 <= data.len() {
-        let size = u32::from_be_bytes(data[pos..pos + 4].try_into().ok()?) as usize;
-        let box_type = &data[pos + 4..pos + 8];
-        if size == 0 || pos + size > data.len() {
-            break;
-        }
-        let content = &data[pos + 8..pos + size];
-
-        match box_type {
-            b"moof" | b"traf" => {
-                if let Some(v) = read_first_display_pts(content) {
-                    min_pts = Some(match min_pts {
-                        Some(cur) => cur.min(v),
-                        None => v,
-                    });
+    crate::segment::isobmff::walk_boxes(
+        data,
+        &[b"moof", b"traf"],
+        &mut |btype, payload| match btype {
+            b"tfdt" => {
+                if payload.is_empty() {
+                    return;
                 }
-            }
-            b"tfdt" => {
-                // We need tfdt + trun samples. Handled at traf level via recursion.
-                let _ = content;
-            }
-            _ => {}
-        }
-        pos += size;
-    }
-
-    // If this is a traf, scan tfdt + trun together
-    let mut tfdt_val: Option<i64> = None;
-    pos = 0;
-    while pos + 8 <= data.len() {
-        let size = u32::from_be_bytes(data[pos..pos + 4].try_into().ok()?) as usize;
-        let box_type = &data[pos + 4..pos + 8];
-        if size == 0 || pos + size > data.len() {
-            break;
-        }
-        let content = &data[pos + 8..pos + size];
-
-        match box_type {
-            b"tfdt" => {
-                let version = content[0];
-                tfdt_val = Some(if version == 1 {
-                    i64::from_be_bytes(content[4..12].try_into().ok()?)
+                let version = payload[0];
+                current_tfdt = Some(if version == 1 && payload.len() >= 12 {
+                    i64::from_be_bytes(payload[4..12].try_into().unwrap())
+                } else if payload.len() >= 8 {
+                    u32::from_be_bytes(payload[4..8].try_into().unwrap()) as i64
                 } else {
-                    u32::from_be_bytes(content[4..8].try_into().ok()?) as i64
+                    0
                 });
             }
             b"trun" => {
-                if let Some(tfdt) = tfdt_val {
-                    let version = content[0];
-                    let flags = u32::from_be_bytes([0, content[1], content[2], content[3]]);
-                    let sc = u32::from_be_bytes(content[4..8].try_into().ok()?) as usize;
-                    let mut off = 8usize;
-                    if flags & 0x001 != 0 {
-                        off += 4;
-                    }
-                    if flags & 0x004 != 0 {
-                        off += 4;
-                    }
-                    let mut running_dts = tfdt;
-                    for _ in 0..sc {
-                        let dur = if flags & 0x100 != 0 {
-                            let v =
-                                u32::from_be_bytes(content[off..off + 4].try_into().ok()?) as i64;
-                            off += 4;
-                            v
-                        } else {
-                            0
-                        };
-                        if flags & 0x200 != 0 {
-                            off += 4;
+                if let Some(tfdt) = current_tfdt {
+                    if payload.len() >= 12 {
+                        let trun_flags =
+                            u32::from_be_bytes([0, payload[1], payload[2], payload[3]]);
+                        let sample_count = u32::from_be_bytes(payload[4..8].try_into().unwrap());
+
+                        let has_duration = trun_flags & 0x0100 != 0;
+                        let has_ct_offset = trun_flags & 0x0800 != 0;
+                        let mut entry_offset = 8;
+                        if trun_flags & 0x0001 != 0 {
+                            entry_offset += 4;
                         }
-                        if flags & 0x400 != 0 {
-                            off += 4;
+                        if trun_flags & 0x0004 != 0 {
+                            entry_offset += 4;
                         }
-                        let ct = if flags & 0x800 != 0 && off + 4 <= content.len() {
-                            let v = if version == 1 {
-                                i32::from_be_bytes(content[off..off + 4].try_into().ok()?) as i64
-                            } else {
-                                u32::from_be_bytes(content[off..off + 4].try_into().ok()?) as i64
-                            };
-                            off += 4;
-                            v
-                        } else {
-                            0
-                        };
-                        let pts = running_dts + ct;
-                        min_pts = Some(match min_pts {
-                            Some(cur) => cur.min(pts),
-                            None => pts,
-                        });
-                        running_dts += dur;
+
+                        let mut per_sample_size = 0usize;
+                        let mut ct_field_offset = 0usize;
+
+                        if has_duration {
+                            per_sample_size += 4;
+                        }
+                        if trun_flags & 0x0200 != 0 {
+                            per_sample_size += 4;
+                        }
+                        if trun_flags & 0x0400 != 0 {
+                            per_sample_size += 4;
+                        }
+                        if has_ct_offset {
+                            ct_field_offset = per_sample_size;
+                            per_sample_size += 4;
+                        }
+
+                        let mut running_dts = tfdt;
+                        let mut off = entry_offset;
+                        for _ in 0..sample_count {
+                            if off + per_sample_size > payload.len() {
+                                break;
+                            }
+
+                            let mut sample_pts = running_dts;
+                            if has_ct_offset {
+                                let ct_bytes =
+                                    &payload[off + ct_field_offset..off + ct_field_offset + 4];
+                                let ct = i32::from_be_bytes(ct_bytes.try_into().unwrap());
+                                sample_pts += ct as i64;
+                            }
+
+                            first_display_pts = Some(match first_display_pts {
+                                Some(cur) => cur.min(sample_pts),
+                                None => sample_pts,
+                            });
+
+                            if has_duration {
+                                let dur_bytes = &payload[off..off + 4];
+                                let dur = u32::from_be_bytes(dur_bytes.try_into().unwrap());
+                                running_dts += dur as i64;
+                            }
+
+                            off += per_sample_size;
+                        }
                     }
                 }
             }
             _ => {}
-        }
-        pos += size;
-    }
+        },
+    );
 
-    min_pts
+    first_display_pts
 }
 
 /// Generate a media segment using FFmpeg (CMAF-style fragmented MP4)
@@ -1124,7 +1035,9 @@ fn generate_media_segment_ffmpeg(
             output_timebase,
         );
         let target_time = if segment_type == "video" {
-            start_pts_rescaled.max(0) as u64
+            // Already inside `if let Some(base_dts) = first_packet_dts`.
+            // Use exact first packet DTS as requested by the user.
+            base_dts.max(0) as u64
         } else {
             // Audio: align to first displayable video frame.
             // first_video_pts_90k is tfdt+CT from the video segment (set by read_first_display_pts).
@@ -1167,7 +1080,9 @@ fn generate_media_segment_ffmpeg(
             encoder_delay
         );
 
-        let start_frag_seq = (segment.sequence as u32).wrapping_add(1);
+        // Use a large multiplier for fragment sequence numbers to ensure they are
+        // monotonically increasing and unique across ALL segments and fragments.
+        let start_frag_seq = (segment.sequence as u32).wrapping_mul(1000).wrapping_add(1);
         patch_tfdts(&mut media_data, target_time, start_frag_seq);
     } else {
         tracing::warn!(

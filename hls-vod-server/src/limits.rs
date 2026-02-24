@@ -7,10 +7,10 @@ use axum::{
     middleware::Next,
     response::Response,
 };
+use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use parking_lot::RwLock;
 use std::time::{Duration, Instant};
 
 /// Rate limiter configuration
@@ -57,7 +57,7 @@ impl TokenBucket {
     /// Try to consume a token
     pub fn try_consume(&mut self) -> bool {
         self.refill();
-        
+
         if self.tokens > 0 {
             self.tokens -= 1;
             true
@@ -70,11 +70,10 @@ impl TokenBucket {
     fn refill(&mut self) {
         let now = Instant::now();
         let elapsed = now.duration_since(self.last_refill).as_secs_f64();
-        
+
         let tokens_to_add = elapsed * self.refill_rate;
-        self.tokens = (self.tokens as f64 + tokens_to_add)
-            .min(self.max_tokens as f64) as u32;
-        
+        self.tokens = (self.tokens as f64 + tokens_to_add).min(self.max_tokens as f64) as u32;
+
         self.last_refill = now;
     }
 }
@@ -99,16 +98,11 @@ impl RateLimiter {
     /// Check if request is allowed
     pub fn is_allowed(&self, ip: SocketAddr) -> bool {
         let mut limiters = self.limiters.write();
-        
-        let limiter = limiters
-            .entry(ip)
-            .or_insert_with(|| {
-                TokenBucket::new(
-                    self.config.burst_size,
-                    self.config.requests_per_second,
-                )
-            });
-        
+
+        let limiter = limiters.entry(ip).or_insert_with(|| {
+            TokenBucket::new(self.config.burst_size, self.config.requests_per_second)
+        });
+
         limiter.try_consume()
     }
 
@@ -116,10 +110,8 @@ impl RateLimiter {
     pub fn cleanup(&self, max_age: Duration) {
         let mut limiters = self.limiters.write();
         let now = Instant::now();
-        
-        limiters.retain(|_, limiter| {
-            now.duration_since(limiter.last_refill) < max_age
-        });
+
+        limiters.retain(|_, limiter| now.duration_since(limiter.last_refill) < max_age);
     }
 }
 
@@ -146,19 +138,19 @@ impl ConnectionLimiter {
     /// Try to acquire a connection slot
     pub fn try_acquire(&self, ip: SocketAddr) -> bool {
         let mut connections = self.connections.write();
-        
+
         // Check total limit
         let total: u32 = connections.values().sum();
         if total >= self.max_total_connections {
             return false;
         }
-        
+
         // Check per-IP limit
         let ip_connections = connections.entry(ip).or_insert(0);
         if *ip_connections >= self.max_connections_per_ip {
             return false;
         }
-        
+
         *ip_connections += 1;
         true
     }
@@ -166,7 +158,7 @@ impl ConnectionLimiter {
     /// Release a connection slot
     pub fn release(&self, ip: SocketAddr) {
         let mut connections = self.connections.write();
-        
+
         if let Some(count) = connections.get_mut(&ip) {
             if *count > 0 {
                 *count -= 1;
@@ -222,10 +214,10 @@ pub async fn connection_limit_middleware(
     }
 
     let response = next.run(request).await;
-    
+
     // Release connection after response
     limiter.release(ip);
-    
+
     Ok(response)
 }
 
@@ -233,7 +225,7 @@ pub async fn connection_limit_middleware(
 pub fn create_rate_limiter(config: &crate::config::ServerConfig) -> Arc<RateLimiter> {
     // Default rate limits
     let rate_limit = config.rate_limit_rps.unwrap_or(100);
-    
+
     Arc::new(RateLimiter::new(RateLimitConfig {
         requests_per_second: rate_limit,
         burst_size: rate_limit / 2,
@@ -243,10 +235,10 @@ pub fn create_rate_limiter(config: &crate::config::ServerConfig) -> Arc<RateLimi
 /// Create connection limiter from config
 pub fn create_connection_limiter(config: &crate::config::ServerConfig) -> Arc<ConnectionLimiter> {
     let max_streams = config.max_concurrent_streams.unwrap_or(100) as u32;
-    
+
     Arc::new(ConnectionLimiter::new(
-        max_streams / 10,  // Max 10% per IP
-        max_streams,       // Max total
+        max_streams / 10, // Max 10% per IP
+        max_streams,      // Max total
     ))
 }
 
@@ -257,12 +249,12 @@ mod tests {
     #[test]
     fn test_token_bucket() {
         let mut bucket = TokenBucket::new(10, 5);
-        
+
         // Should allow burst
         for _ in 0..10 {
             assert!(bucket.try_consume());
         }
-        
+
         // Should be empty now
         assert!(!bucket.try_consume());
     }
@@ -273,14 +265,14 @@ mod tests {
             requests_per_second: 10,
             burst_size: 5,
         });
-        
+
         let ip = SocketAddr::from(([127, 0, 0, 1], 8080));
-        
+
         // Should allow burst
         for _ in 0..5 {
             assert!(limiter.is_allowed(ip));
         }
-        
+
         // Should be rate limited
         assert!(!limiter.is_allowed(ip));
     }
@@ -289,18 +281,18 @@ mod tests {
     fn test_connection_limiter() {
         let limiter = ConnectionLimiter::new(5, 10);
         let ip = SocketAddr::from(([127, 0, 0, 1], 8080));
-        
+
         // Should allow up to max per IP
         for _ in 0..5 {
             assert!(limiter.try_acquire(ip));
         }
-        
+
         // Should reject additional
         assert!(!limiter.try_acquire(ip));
-        
+
         // Release one
         limiter.release(ip);
-        
+
         // Should allow again
         assert!(limiter.try_acquire(ip));
     }
@@ -308,15 +300,15 @@ mod tests {
     #[test]
     fn test_connection_limiter_total() {
         let limiter = ConnectionLimiter::new(5, 3);
-        
+
         let ip1 = SocketAddr::from(([127, 0, 0, 1], 8080));
         let ip2 = SocketAddr::from(([127, 0, 0, 2], 8080));
         let ip3 = SocketAddr::from(([127, 0, 0, 3], 8080));
-        
+
         assert!(limiter.try_acquire(ip1));
         assert!(limiter.try_acquire(ip2));
         assert!(limiter.try_acquire(ip3));
-        
+
         // Total limit reached
         assert!(!limiter.try_acquire(SocketAddr::from(([127, 0, 0, 4], 8080))));
     }

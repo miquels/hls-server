@@ -153,7 +153,8 @@ impl ConfigFile {
                 enable_transcoding: self.audio.enable_transcoding.unwrap_or(true),
             },
             cors_enabled: self.server.cors_enabled.unwrap_or(true),
-            log_level: self.logging
+            log_level: self
+                .logging
                 .map(|l| l.level)
                 .unwrap_or_else(|| "info".to_string()),
             max_concurrent_streams: self.limits.as_ref().and_then(|l| l.max_concurrent_streams),
@@ -186,11 +187,11 @@ mod tests {
     #[test]
     fn test_config_file_roundtrip() {
         let config = ConfigFile::default_config();
-        
+
         let mut temp_file = NamedTempFile::new().unwrap();
         let content = toml::to_string_pretty(&config).unwrap();
         temp_file.write_all(content.as_bytes()).unwrap();
-        
+
         let loaded = ConfigFile::from_file(temp_file.path()).unwrap();
         assert_eq!(loaded.server.port, config.server.port);
         assert_eq!(loaded.cache.max_memory_mb, config.cache.max_memory_mb);
@@ -200,7 +201,7 @@ mod tests {
     fn test_into_server_config() {
         let config_file = ConfigFile::default_config();
         let server_config = config_file.into_server_config();
-        
+
         assert_eq!(server_config.port, 3000);
         assert_eq!(server_config.cache.max_memory_mb, 512);
         assert_eq!(server_config.segment.target_duration_secs, 4.0);
@@ -210,9 +211,9 @@ mod tests {
     fn test_generate_default_config() {
         let temp_file = NamedTempFile::new().unwrap();
         let path = temp_file.path().to_path_buf();
-        
+
         generate_default_config(&path).unwrap();
-        
+
         assert!(path.exists());
         let loaded = ConfigFile::from_file(&path).unwrap();
         assert_eq!(loaded.server.port, 3000);

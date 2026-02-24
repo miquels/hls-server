@@ -5,9 +5,9 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
+use parking_lot::RwLock;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use parking_lot::RwLock;
 
 /// Metrics collector
 #[derive(Debug)]
@@ -51,7 +51,9 @@ impl Metrics {
     /// Record a request
     pub fn record_request(&self, endpoint: &str) {
         *self.request_count.write() += 1;
-        *self.requests_by_endpoint.write()
+        *self
+            .requests_by_endpoint
+            .write()
             .entry(endpoint.to_string())
             .or_insert(0) += 1;
     }
@@ -83,7 +85,9 @@ impl Metrics {
 
     /// Record error
     pub fn record_error(&self, error_type: &str) {
-        *self.errors_by_type.write()
+        *self
+            .errors_by_type
+            .write()
             .entry(error_type.to_string())
             .or_insert(0) += 1;
     }
@@ -100,22 +104,31 @@ impl Metrics {
         // Server info
         output.push_str("# HELP hls_server_uptime_seconds Server uptime in seconds\n");
         output.push_str("# TYPE hls_server_uptime_seconds counter\n");
-        output.push_str(&format!("hls_server_uptime_seconds {}\n", self.uptime_secs()));
+        output.push_str(&format!(
+            "hls_server_uptime_seconds {}\n",
+            self.uptime_secs()
+        ));
 
-        output.push_str("\n# HELP hls_server_start_time_seconds Server start time as Unix timestamp\n");
+        output.push_str(
+            "\n# HELP hls_server_start_time_seconds Server start time as Unix timestamp\n",
+        );
         output.push_str("# TYPE hls_server_start_time_seconds gauge\n");
         output.push_str(&format!(
             "hls_server_start_time_seconds {}\n",
             std::time::SystemTime::UNIX_EPOCH
                 .elapsed()
                 .unwrap_or(Duration::ZERO)
-                .as_secs() - self.uptime_secs()
+                .as_secs()
+                - self.uptime_secs()
         ));
 
         // Request metrics
         output.push_str("\n# HELP hls_requests_total Total number of HTTP requests\n");
         output.push_str("# TYPE hls_requests_total counter\n");
-        output.push_str(&format!("hls_requests_total {}\n", *self.request_count.read()));
+        output.push_str(&format!(
+            "hls_requests_total {}\n",
+            *self.request_count.read()
+        ));
 
         output.push_str("\n# HELP hls_requests_by_endpoint Requests by endpoint\n");
         output.push_str("# TYPE hls_requests_by_endpoint counter\n");
@@ -129,16 +142,25 @@ impl Metrics {
         // Bytes served
         output.push_str("\n# HELP hls_bytes_served_total Total bytes served\n");
         output.push_str("# TYPE hls_bytes_served_total counter\n");
-        output.push_str(&format!("hls_bytes_served_total {}\n", *self.bytes_served.read()));
+        output.push_str(&format!(
+            "hls_bytes_served_total {}\n",
+            *self.bytes_served.read()
+        ));
 
         // Cache metrics
         output.push_str("\n# HELP hls_cache_hits_total Total cache hits\n");
         output.push_str("# TYPE hls_cache_hits_total counter\n");
-        output.push_str(&format!("hls_cache_hits_total {}\n", *self.cache_hits.read()));
+        output.push_str(&format!(
+            "hls_cache_hits_total {}\n",
+            *self.cache_hits.read()
+        ));
 
         output.push_str("\n# HELP hls_cache_misses_total Total cache misses\n");
         output.push_str("# TYPE hls_cache_misses_total counter\n");
-        output.push_str(&format!("hls_cache_misses_total {}\n", *self.cache_misses.read()));
+        output.push_str(&format!(
+            "hls_cache_misses_total {}\n",
+            *self.cache_misses.read()
+        ));
 
         let hits = *self.cache_hits.read();
         let misses = *self.cache_misses.read();
@@ -154,12 +176,18 @@ impl Metrics {
         // Stream metrics
         output.push_str("\n# HELP hls_active_streams Number of active streams\n");
         output.push_str("# TYPE hls_active_streams gauge\n");
-        output.push_str(&format!("hls_active_streams {}\n", *self.active_streams.read()));
+        output.push_str(&format!(
+            "hls_active_streams {}\n",
+            *self.active_streams.read()
+        ));
 
         // Transcoding metrics
         output.push_str("\n# HELP hls_transcode_operations_total Total transcoding operations\n");
         output.push_str("# TYPE hls_transcode_operations_total counter\n");
-        output.push_str(&format!("hls_transcode_operations_total {}\n", *self.transcode_operations.read()));
+        output.push_str(&format!(
+            "hls_transcode_operations_total {}\n",
+            *self.transcode_operations.read()
+        ));
 
         // Error metrics
         output.push_str("\n# HELP hls_errors_total Total errors by type\n");
@@ -182,16 +210,15 @@ impl Default for Metrics {
 }
 
 /// Metrics endpoint handler
-pub async fn metrics_handler(
-    State(metrics): State<Arc<Metrics>>,
-) -> Response {
+pub async fn metrics_handler(State(metrics): State<Arc<Metrics>>) -> Response {
     let prometheus_output = metrics.export_prometheus();
-    
+
     (
         StatusCode::OK,
         [("Content-Type", "text/plain; version=0.0.4")],
         prometheus_output,
-    ).into_response()
+    )
+        .into_response()
 }
 
 #[cfg(test)]
@@ -209,7 +236,7 @@ mod tests {
         let metrics = Metrics::new();
         metrics.record_request("/test");
         metrics.record_request("/test");
-        
+
         assert_eq!(*metrics.request_count.read(), 2);
         assert_eq!(metrics.requests_by_endpoint.read().get("/test"), Some(&2));
     }
@@ -220,7 +247,7 @@ mod tests {
         metrics.record_cache_hit();
         metrics.record_cache_hit();
         metrics.record_cache_miss();
-        
+
         assert_eq!(*metrics.cache_hits.read(), 2);
         assert_eq!(*metrics.cache_misses.read(), 1);
     }
@@ -230,9 +257,9 @@ mod tests {
         let metrics = Metrics::new();
         metrics.record_request("/test");
         metrics.record_cache_hit();
-        
+
         let output = metrics.export_prometheus();
-        
+
         assert!(output.contains("hls_requests_total"));
         assert!(output.contains("hls_cache_hits_total"));
         assert!(output.contains("hls_server_uptime_seconds"));
@@ -244,7 +271,7 @@ mod tests {
         metrics.record_error("stream_not_found");
         metrics.record_error("stream_not_found");
         metrics.record_error("segment_not_found");
-        
+
         let errors = metrics.errors_by_type.read();
         assert_eq!(errors.get("stream_not_found"), Some(&2));
         assert_eq!(errors.get("segment_not_found"), Some(&1));

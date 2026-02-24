@@ -101,7 +101,8 @@ pub async fn audio_playlist(
     track_index: usize,
     force_aac: bool,
 ) -> Result<Response, HttpError> {
-    let playlist_id = format!("a/{}/media.m3u8", track_index);
+    let suffix = if force_aac { "-aac" } else { "" };
+    let playlist_id = format!("a/{}{}/media.m3u8", track_index, suffix);
     let playlist = hls_vod_lib::generate_track_playlist(stream_id, &playlist_id)?;
 
     let mut headers = HeaderMap::new();
@@ -158,7 +159,8 @@ pub async fn audio_init_segment(
     track_index: usize,
     force_aac: bool,
 ) -> Result<Response, HttpError> {
-    let segment_id = format!("a/{}/init.mp4", track_index);
+    let suffix = if force_aac { "-aac" } else { "" };
+    let segment_id = format!("a/{}{}/init.mp4", track_index, suffix);
     let bytes = hls_vod_lib::generate_segment(stream_id, &segment_id)?;
 
     let mut headers = HeaderMap::new();
@@ -203,7 +205,8 @@ pub async fn audio_segment(
     sequence: usize,
     force_aac: bool,
 ) -> Result<Response, HttpError> {
-    let segment_id = format!("a/{}/{}.m4s", track_index, sequence);
+    let suffix = if force_aac { "-aac" } else { "" };
+    let segment_id = format!("a/{}{}/{}.m4s", track_index, suffix, sequence);
     let bytes = hls_vod_lib::generate_segment(stream_id, &segment_id)?;
 
     let mut headers = HeaderMap::new();

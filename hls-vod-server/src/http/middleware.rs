@@ -2,20 +2,12 @@
 //!
 //! Additional middleware for the HTTP server.
 
-use axum::{
-    body::Body,
-    http::Request,
-    middleware::Next,
-    response::Response,
-};
+use axum::{body::Body, http::Request, middleware::Next, response::Response};
 use std::time::Instant;
 use tracing::{info, warn};
 
 /// Request logging middleware
-pub async fn request_logger(
-    request: Request<Body>,
-    next: Next,
-) -> Response {
+pub async fn request_logger(request: Request<Body>, next: Next) -> Response {
     let method = request.method().clone();
     let uri = request.uri().clone();
     let start = Instant::now();
@@ -37,15 +29,12 @@ pub async fn request_logger(
 }
 
 /// Rate limiting middleware (placeholder)
-/// 
+///
 /// TODO: Implement proper rate limiting with:
 /// - Token bucket algorithm
 /// - Per-IP limits
 /// - Configurable limits
-pub async fn rate_limiter(
-    request: Request<Body>,
-    next: Next,
-) -> Response {
+pub async fn rate_limiter(request: Request<Body>, next: Next) -> Response {
     // For now, pass through all requests
     next.run(request).await
 }
@@ -56,10 +45,7 @@ pub async fn rate_limiter(
 /// - Max concurrent connections
 /// - Per-IP connection limits
 /// - Queue for excess connections
-pub async fn connection_limiter(
-    request: Request<Body>,
-    next: Next,
-) -> Response {
+pub async fn connection_limiter(request: Request<Body>, next: Next) -> Response {
     // For now, pass through all requests
     next.run(request).await
 }

@@ -316,9 +316,11 @@ pub fn mux_aac_packets_to_fmp4(
     let sample_rate = sample_rate.max(1);
     out_stream.set_time_base(ffmpeg::Rational::new(1, sample_rate));
 
-    // Write header with frag_every_frame so packets flush immediately
+    // Write header. We don't use frag_every_frame anymore because our custom IO
+    // now correctly supports seeking (AVSEEK_SIZE), allowing write_trailer()
+    // to flush the buffer as a single clean fragment.
     let mut opts = ffmpeg::Dictionary::new();
-    opts.set("movflags", "empty_moov+default_base_moof+frag_every_frame");
+    opts.set("movflags", "empty_moov+default_base_moof");
     output
         .write_header_with(opts)
         .map_err(|e| FfmpegError::WriteError(format!("write_header: {}", e)))?;

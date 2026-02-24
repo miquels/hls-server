@@ -2,8 +2,8 @@
 
 //! Subtitle decoder for extracting subtitle packets
 
+use crate::error::{FfmpegError, HlsError, Result};
 use ffmpeg_next as ffmpeg;
-use crate::error::{FfmpegError, Result, HlsError};
 
 /// Subtitle decoder for extracting text from source streams
 pub struct SubtitleDecoder {
@@ -19,12 +19,17 @@ pub struct SubtitleDecoder {
 
 impl SubtitleDecoder {
     /// Create a new subtitle decoder
-    pub fn new(codec_id: ffmpeg::codec::Id, stream_index: usize, timebase: ffmpeg::Rational) -> Result<Self> {
+    pub fn new(
+        codec_id: ffmpeg::codec::Id,
+        stream_index: usize,
+        timebase: ffmpeg::Rational,
+    ) -> Result<Self> {
         // Verify decoder exists
         if !crate::ffmpeg_utils::helpers::decoder_exists(codec_id) {
-            return Err(HlsError::Ffmpeg(
-                FfmpegError::DecoderNotFound(format!("Subtitle codec {:?} not found", codec_id))
-            ));
+            return Err(HlsError::Ffmpeg(FfmpegError::DecoderNotFound(format!(
+                "Subtitle codec {:?} not found",
+                codec_id
+            ))));
         }
 
         // Check if this is a text-based format (not bitmap)
@@ -75,7 +80,7 @@ pub fn is_text_subtitle_codec(codec_id: ffmpeg::codec::Id) -> bool {
             | ffmpeg::codec::Id::SSA           // SSA
             | ffmpeg::codec::Id::MOV_TEXT      // QuickTime TTXT
             | ffmpeg::codec::Id::TEXT          // Plain text
-            | ffmpeg::codec::Id::WEBVTT        // WebVTT
+            | ffmpeg::codec::Id::WEBVTT // WebVTT
     )
 }
 
@@ -86,7 +91,7 @@ pub fn is_bitmap_subtitle_codec(codec_id: ffmpeg::codec::Id) -> bool {
         ffmpeg::codec::Id::HDMV_PGS_SUBTITLE  // Blu-ray PGS
             | ffmpeg::codec::Id::DVB_SUBTITLE       // DVB
             | ffmpeg::codec::Id::DVB_TELETEXT       // DVB Teletext
-            | ffmpeg::codec::Id::XSUB               // DivX XSUB
+            | ffmpeg::codec::Id::XSUB // DivX XSUB
     )
 }
 
@@ -113,21 +118,31 @@ mod tests {
         assert!(is_text_subtitle_codec(ffmpeg::codec::Id::SUBRIP));
         assert!(is_text_subtitle_codec(ffmpeg::codec::Id::ASS));
         assert!(is_text_subtitle_codec(ffmpeg::codec::Id::MOV_TEXT));
-        assert!(!is_text_subtitle_codec(ffmpeg::codec::Id::HDMV_PGS_SUBTITLE));
+        assert!(!is_text_subtitle_codec(
+            ffmpeg::codec::Id::HDMV_PGS_SUBTITLE
+        ));
     }
 
     #[test]
     fn test_is_bitmap_subtitle_codec() {
-        assert!(is_bitmap_subtitle_codec(ffmpeg::codec::Id::HDMV_PGS_SUBTITLE));
+        assert!(is_bitmap_subtitle_codec(
+            ffmpeg::codec::Id::HDMV_PGS_SUBTITLE
+        ));
         assert!(is_bitmap_subtitle_codec(ffmpeg::codec::Id::DVB_SUBTITLE));
         assert!(!is_bitmap_subtitle_codec(ffmpeg::codec::Id::SUBRIP));
     }
 
     #[test]
     fn test_get_subtitle_format_name() {
-        assert_eq!(get_subtitle_format_name(ffmpeg::codec::Id::SUBRIP), "SubRip (SRT)");
+        assert_eq!(
+            get_subtitle_format_name(ffmpeg::codec::Id::SUBRIP),
+            "SubRip (SRT)"
+        );
         assert_eq!(get_subtitle_format_name(ffmpeg::codec::Id::ASS), "ASS/SSA");
-        assert_eq!(get_subtitle_format_name(ffmpeg::codec::Id::HDMV_PGS_SUBTITLE), "PGS (Bitmap)");
+        assert_eq!(
+            get_subtitle_format_name(ffmpeg::codec::Id::HDMV_PGS_SUBTITLE),
+            "PGS (Bitmap)"
+        );
     }
 
     #[test]
@@ -149,8 +164,9 @@ mod tests {
             ffmpeg::codec::Id::SUBRIP,
             0,
             ffmpeg::Rational::new(1, 90000),
-        ).unwrap();
-        
+        )
+        .unwrap();
+
         // 90000 ticks = 1 second = 1000ms
         assert_eq!(decoder.pts_to_ms(90000), 1000);
         assert_eq!(decoder.pts_to_ms(45000), 500);
