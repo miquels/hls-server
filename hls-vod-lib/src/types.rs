@@ -270,7 +270,7 @@ impl StreamIndex {
 
     /// Retrieve a context to read the file.
     /// Returns either the locked cached context, or freshly opens the file if none is cached.
-    pub fn get_context(&self) -> Result<ContextGuard> {
+    pub fn get_context(&self) -> Result<ContextGuard<'_>> {
         if let Some(arc_mutex) = &self.cached_context {
             let guard = arc_mutex.lock().map_err(|_| {
                 HlsError::Ffmpeg(crate::error::FfmpegError::OpenInput(
