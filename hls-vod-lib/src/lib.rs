@@ -14,8 +14,8 @@
 //!
 //! ## Usage
 //!
-//! 1. **Initialization:** Call `init()` and `install_log_filter()` at startup. `init_cache()` too
-//!    if you are going to generate segments.
+//! 1. **Initialization:** Call `init()` and `install_log_filter()` at startup. `init_segment_cache()` too
+//!    if you want to enable the segment cache.
 //! 2. **Parsing:** Use `MediaInfo::open` to scan a media file and return an `<Arc<MediaInfo>` struct.
 //!    The information is cached, it's cheap to call after the first tume.
 //! 3. **Playlists:**
@@ -24,7 +24,6 @@
 //! 4. **Segments:** Generate actual media segments (fMP4 or WebVTT) handling specific sequence requests with `MediaInfo::generate_segment`.
 
 pub(crate) mod api;
-pub(crate) mod cache;
 pub(crate) mod error;
 pub(crate) mod ffmpeg_utils;
 pub(crate) mod index;

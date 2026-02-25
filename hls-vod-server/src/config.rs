@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-pub use hls_vod_lib::CacheConfig;
+pub use hls_vod_lib::SegmentCacheConfig;
 
 /// Segment configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -60,7 +60,7 @@ pub struct ServerConfig {
     pub port: u16,
 
     /// Cache configuration
-    pub cache: CacheConfig,
+    pub cache: SegmentCacheConfig,
 
     /// Segment configuration
     pub segment: SegmentConfig,
@@ -86,7 +86,7 @@ impl Default for ServerConfig {
         Self {
             host: "0.0.0.0".to_string(),
             port: 3000,
-            cache: CacheConfig::default(),
+            cache: SegmentCacheConfig::default(),
             segment: SegmentConfig::default(),
             audio: AudioConfig::default(),
             cors_enabled: true,
@@ -133,7 +133,7 @@ mod tests {
 
     #[test]
     fn test_cache_config_max_bytes() {
-        let cache = CacheConfig {
+        let cache = SegmentCacheConfig {
             max_memory_mb: 256,
             ..Default::default()
         };

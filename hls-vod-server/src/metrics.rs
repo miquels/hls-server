@@ -148,17 +148,17 @@ impl Metrics {
         ));
 
         // Cache metrics
-        output.push_str("\n# HELP hls_cache_hits_total Total cache hits\n");
-        output.push_str("# TYPE hls_cache_hits_total counter\n");
+        output.push_str("\n# HELP hls_segment_cache_hits_total Total cache hits\n");
+        output.push_str("# TYPE hls_segment_cache_hits_total counter\n");
         output.push_str(&format!(
-            "hls_cache_hits_total {}\n",
+            "hls_segment_cache_hits_total {}\n",
             *self.cache_hits.read()
         ));
 
-        output.push_str("\n# HELP hls_cache_misses_total Total cache misses\n");
-        output.push_str("# TYPE hls_cache_misses_total counter\n");
+        output.push_str("\n# HELP hls_segment_cache_misses_total Total cache misses\n");
+        output.push_str("# TYPE hls_segment_cache_misses_total counter\n");
         output.push_str(&format!(
-            "hls_cache_misses_total {}\n",
+            "hls_segment_cache_misses_total {}\n",
             *self.cache_misses.read()
         ));
 
@@ -169,9 +169,9 @@ impl Metrics {
         } else {
             0.0
         };
-        output.push_str("\n# HELP hls_cache_hit_ratio Cache hit ratio\n");
-        output.push_str("# TYPE hls_cache_hit_ratio gauge\n");
-        output.push_str(&format!("hls_cache_hit_ratio {:.4}\n", hit_ratio));
+        output.push_str("\n# HELP hls_segment_cache_hit_ratio Cache hit ratio\n");
+        output.push_str("# TYPE hls_segment_cache_hit_ratio gauge\n");
+        output.push_str(&format!("hls_segment_cache_hit_ratio {:.4}\n", hit_ratio));
 
         // Stream metrics
         output.push_str("\n# HELP hls_active_streams Number of active streams\n");
@@ -261,7 +261,7 @@ mod tests {
         let output = metrics.export_prometheus();
 
         assert!(output.contains("hls_requests_total"));
-        assert!(output.contains("hls_cache_hits_total"));
+        assert!(output.contains("hls_segment_cache_hits_total"));
         assert!(output.contains("hls_server_uptime_seconds"));
     }
 

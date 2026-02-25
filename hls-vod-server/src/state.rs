@@ -32,7 +32,7 @@ pub struct AppState {
 
 impl AppState {
     pub fn new(config: ServerConfig) -> Self {
-        hls_vod_lib::init_cache(config.cache.clone());
+        hls_vod_lib::init_segment_cache(config.cache.clone());
 
         Self {
             indexing_in_flight: DashMap::new(),
@@ -47,8 +47,8 @@ impl AppState {
     }
 
     /// Get cache statistics
-    pub fn cache_stats(&self) -> hls_vod_lib::CacheStats {
-        hls_vod_lib::cache_stats()
+    pub fn cache_stats(&self) -> hls_vod_lib::SegmentCacheStats {
+        hls_vod_lib::segment_cache_stats()
     }
 
     /// Signal shutdown

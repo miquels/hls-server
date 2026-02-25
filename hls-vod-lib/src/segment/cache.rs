@@ -15,16 +15,16 @@ static CACHE: OnceLock<SegmentCache> = OnceLock::new();
 
 /// Initialize the global segment cache.
 /// This function should be called once at application startup.
-pub fn init_cache(config: CacheConfig) {
+pub fn init_cache(config: SegmentCacheConfig) {
     let _ = CACHE.set(SegmentCache::new(config));
 }
 
 /// Retrieve the global cache stats
-pub fn cache_stats() -> CacheStats {
+pub fn cache_stats() -> SegmentCacheStats {
     if let Some(c) = CACHE.get() {
         c.stats()
     } else {
-        CacheStats {
+        SegmentCacheStats {
             entry_count: 0,
             total_size_bytes: 0,
             memory_limit_bytes: 0,
@@ -34,13 +34,13 @@ pub fn cache_stats() -> CacheStats {
 }
 
 /// Access the global cache internal instance
-pub(crate) fn global_cache() -> Option<&'static SegmentCache> {
+pub(crate) fn get() -> Option<&'static SegmentCache> {
     CACHE.get()
 }
 
 /// Cache configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CacheConfig {
+pub struct SegmentCacheConfig {
     /// Maximum memory usage for segment cache in megabytes
     pub max_memory_mb: usize,
 
@@ -51,7 +51,7 @@ pub struct CacheConfig {
     pub ttl_secs: u64,
 }
 
-impl Default for CacheConfig {
+impl Default for SegmentCacheConfig {
     fn default() -> Self {
         Self {
             max_memory_mb: 512,
@@ -61,7 +61,7 @@ impl Default for CacheConfig {
     }
 }
 
-impl CacheConfig {
+impl SegmentCacheConfig {
     /// Get maximum memory in bytes
     pub fn max_memory_bytes(&self) -> usize {
         self.max_memory_mb * 1024 * 1024
@@ -109,12 +109,12 @@ pub struct SegmentCache {
     /// Current memory usage in bytes
     memory_bytes: AtomicUsize,
     /// Cache configuration
-    config: CacheConfig,
+    config: SegmentCacheConfig,
 }
 
 impl SegmentCache {
     /// Create a new segment cache
-    pub fn new(config: CacheConfig) -> Self {
+    pub fn new(config: SegmentCacheConfig) -> Self {
         Self {
             entries: DashMap::new(),
             memory_bytes: AtomicUsize::new(0),
@@ -240,7 +240,7 @@ impl SegmentCache {
     }
 
     /// Get cache statistics
-    pub fn stats(&self) -> CacheStats {
+    pub fn stats(&self) -> SegmentCacheStats {
         let mut count = 0;
         let mut total_size = 0;
         let mut oldest_age = 0;
@@ -254,7 +254,7 @@ impl SegmentCache {
             }
         }
 
-        CacheStats {
+        SegmentCacheStats {
             entry_count: count,
             total_size_bytes: total_size,
             memory_limit_bytes: self.config.max_memory_bytes(),
@@ -265,7 +265,7 @@ impl SegmentCache {
 
 /// Cache statistics
 #[derive(Debug)]
-pub struct CacheStats {
+pub struct SegmentCacheStats {
     pub entry_count: usize,
     pub total_size_bytes: usize,
     pub memory_limit_bytes: usize,
@@ -274,7 +274,7 @@ pub struct CacheStats {
 
 impl Default for SegmentCache {
     fn default() -> Self {
-        Self::new(CacheConfig::default())
+        Self::new(SegmentCacheConfig::default())
     }
 }
 
@@ -307,7 +307,7 @@ mod tests {
 
     #[test]
     fn test_cache_insert_get() {
-        let cache = SegmentCache::new(CacheConfig::default());
+        let cache = SegmentCache::new(SegmentCacheConfig::default());
         let data = Bytes::from("segment data");
 
         cache.insert("stream1", "video", 0, data.clone());
@@ -318,7 +318,7 @@ mod tests {
 
     #[test]
     fn test_cache_miss() {
-        let cache = SegmentCache::new(CacheConfig::default());
+        let cache = SegmentCache::new(SegmentCacheConfig::default());
 
         assert!(!cache.contains("stream1", "video", 0));
         assert_eq!(cache.get("stream1", "video", 0, true), None);
@@ -326,7 +326,7 @@ mod tests {
 
     #[test]
     fn test_cache_remove_stream() {
-        let cache = SegmentCache::new(CacheConfig::default());
+        let cache = SegmentCache::new(SegmentCacheConfig::default());
 
         cache.insert("stream1", "video", 0, Bytes::from("v0"));
         cache.insert("stream1", "video", 1, Bytes::from("v1"));
@@ -343,7 +343,7 @@ mod tests {
 
     #[test]
     fn test_cache_stats() {
-        let cache = SegmentCache::new(CacheConfig::default());
+        let cache = SegmentCache::new(SegmentCacheConfig::default());
 
         cache.insert("stream1", "video", 0, Bytes::from("data"));
 
@@ -360,7 +360,7 @@ mod tests {
 
     #[test]
     fn test_cache_len_and_empty() {
-        let cache = SegmentCache::new(CacheConfig::default());
+        let cache = SegmentCache::new(SegmentCacheConfig::default());
         assert!(cache.is_empty());
         assert_eq!(cache.len(), 0);
 

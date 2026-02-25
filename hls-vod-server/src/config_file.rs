@@ -137,7 +137,7 @@ impl ConfigFile {
         ServerConfig {
             host: self.server.host,
             port: self.server.port,
-            cache: crate::config::CacheConfig {
+            cache: crate::config::SegmentCacheConfig {
                 max_memory_mb: self.cache.max_memory_mb,
                 max_segments: self.cache.max_segments,
                 ttl_secs: self.cache.ttl_secs,
