@@ -317,6 +317,10 @@ impl MediaInfo {
     }
 
     /// Generate the master playlist (m3u8).
+    ///
+    /// The prefix is prepended to the relative url of audio/video/subtitle playlists.
+    /// In general, you would use the basename of the video file.
+    ///
     /// Returns a multi-variant HLS playlist that directs clients to specific audio/video tracks.
     pub fn generate_main_playlist(&self, prefix: &str) -> Result<String> {
         Ok(generate_master_playlist(&self.index, prefix))
