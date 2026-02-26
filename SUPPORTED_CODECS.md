@@ -2,9 +2,9 @@
 
 We're going to change the way we handle audio and webvtt tracks.
 
-We're going to add a codecs argument to MediaInfo::open:
+We're going to add a codecs argument to StreamIndex::open:
 
-`fn open(path: &Path, codecs: &[impl AsRef<str>], stream_id: Option<String>) -> Result<Arc<MediaInfo>>`
+`fn open(path: &Path, codecs: &[impl AsRef<str>], stream_id: Option<String>) -> Result<Arc<StreamIndex>>`
 
 if the codecs slice is empty, we don't do anything special. otherwise:
 
@@ -22,5 +22,5 @@ Check if you can re-use the audio planner for this, or remove the audio planner 
 
 
 Once this is done, update the `hls_vod_server` code to accept a query parameter called `codecs` that
-has a list of comma-separated codecs, and use them in the call to MediaInfo::open().
+has a list of comma-separated codecs, and use them in the call to StreamIndex::open().
 
