@@ -24,7 +24,7 @@ pub fn test_stream_lifecycle() -> ValidationResult {
 
     // Generate and validate master playlist
     let master = media
-        .generate_main_playlist(&_prefix)
+        .generate_main_playlist(&_prefix, false, false)
         .expect("Master generated");
     let master_result = validate_master_playlist(&master);
     if !master_result.is_valid {
@@ -55,7 +55,7 @@ pub fn test_playlist_generation() -> Vec<(&'static str, ValidationResult)> {
         let fixture = TestMediaInfo::aac_only();
         let media = fixture.create_mock_media();
         let master = media
-            .generate_main_playlist("/test")
+            .generate_main_playlist("/test", false)
             .expect("Failed to generate master");
         let result = validate_master_playlist(&master);
         results.push(("AAC-only master playlist", result));
@@ -66,7 +66,7 @@ pub fn test_playlist_generation() -> Vec<(&'static str, ValidationResult)> {
         let fixture = TestMediaInfo::ac3_only();
         let media = fixture.create_mock_media();
         let master = media
-            .generate_main_playlist("/test")
+            .generate_main_playlist("/test", false)
             .expect("Failed to generate master");
         let result = validate_master_playlist(&master);
         results.push(("AC-3 master playlist", result));
@@ -77,7 +77,7 @@ pub fn test_playlist_generation() -> Vec<(&'static str, ValidationResult)> {
         let fixture = TestMediaInfo::multi_audio();
         let media = fixture.create_mock_media();
         let master = media
-            .generate_main_playlist("/test")
+            .generate_main_playlist("/test", false)
             .expect("Failed to generate master");
         let result = validate_master_playlist(&master);
         results.push(("Multi-audio master playlist", result));
@@ -88,7 +88,7 @@ pub fn test_playlist_generation() -> Vec<(&'static str, ValidationResult)> {
         let fixture = TestMediaInfo::with_subtitles();
         let media = fixture.create_mock_media();
         let master = media
-            .generate_main_playlist("/test")
+            .generate_main_playlist("/test", false)
             .expect("Failed to generate master");
         let result = validate_master_playlist(&master);
         results.push(("With subtitles master playlist", result));
@@ -99,7 +99,7 @@ pub fn test_playlist_generation() -> Vec<(&'static str, ValidationResult)> {
         let fixture = TestMediaInfo::multi_language();
         let media = fixture.create_mock_media();
         let master = media
-            .generate_main_playlist("/test")
+            .generate_main_playlist("/test", false)
             .expect("Failed to generate master");
         let result = validate_master_playlist(&master);
         results.push(("Multi-language master playlist", result));
@@ -115,7 +115,7 @@ pub fn test_audio_track_switching() -> ValidationResult {
 
     // Generate master playlist
     let master = media
-        .generate_main_playlist("/test")
+        .generate_main_playlist("/test", false)
         .expect("Failed to generate master");
 
     // Verify multiple audio tracks are present
@@ -206,7 +206,7 @@ pub fn benchmark_playlist_generation(iterations: usize) -> BenchmarkResult {
 
     let start = Instant::now();
     for _ in 0..iterations {
-        let _ = media.generate_main_playlist("/test");
+        let _ = media.generate_main_playlist("/test", false);
         let _ = media.generate_track_playlist("v/media.m3u8");
         let _ = media.generate_track_playlist("a/1.m3u8");
         let _ = media.generate_track_playlist("a/2.m3u8");

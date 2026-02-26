@@ -13,16 +13,23 @@ use crate::types::StreamIndex;
 /// - One `#EXT-X-STREAM-INF` per audio codec group, all referencing the
 ///   same video variant playlist but differing in `AUDIO=` and `CODECS=`
 /// - Subtitle MEDIA entries for text tracks
-pub fn generate_master_playlist(index: &StreamIndex, prefix: &str) -> String {
+///
+/// When `interleaved` is true and there's exactly one video and one audio track,
+/// generates a single muxed audio-video playlist instead of separate tracks.
+/// When `force_aac` is also true, the audio will be transcoded to AAC.
+pub fn generate_master_playlist(
+    index: &StreamIndex,
+    video_url: &str,
+    session_id: Option<&str>,
+    interleaved: bool,
+    force_aac: bool,
+) -> String {
     let mut output = String::new();
 
     // Header
     output.push_str("#EXTM3U\n");
     output.push_str("#EXT-X-VERSION:7\n");
     output.push_str("\n");
-
-    // Use provided prefix for URLs
-    let base_name = prefix;
 
     // Stream details collected directly from index
 
@@ -72,7 +79,12 @@ pub fn generate_master_playlist(index: &StreamIndex, prefix: &str) -> String {
         }
     }
 
-    if !index.audio_streams.is_empty() {
+    // Skip separate audio tracks section when using interleaved mode
+    // (audio is already muxed into the video stream)
+    let skip_audio_section =
+        interleaved && index.video_streams.len() == 1 && index.audio_streams.len() == 1;
+
+    if !index.audio_streams.is_empty() && !skip_audio_section {
         output.push_str("# Audio Tracks\n");
 
         // Sort variants for stable output: by group_id then stream_index
@@ -112,15 +124,23 @@ pub fn generate_master_playlist(index: &StreamIndex, prefix: &str) -> String {
             let is_first_in_group = seen_groups.insert(group_id);
             let default = if is_first_in_group { "YES" } else { "NO" };
 
-            let uri = if variant.is_transcoded {
-                format!("{}/a/{}-aac.m3u8", base_name, variant.stream_index)
-            } else {
-                format!("{}/a/{}.m3u8", base_name, variant.stream_index)
+            let uri = crate::url::HlsUrl {
+                video_url: video_url.to_string(),
+                session_id: session_id.map(|s| s.to_string()),
+                url_type: crate::url::UrlType::Playlist(crate::url::Playlist {
+                    track_id: variant.stream_index,
+                    audio_track_id: None,
+                    audio_transcode_to: if variant.is_transcoded {
+                        Some("aac".to_string())
+                    } else {
+                        None
+                    },
+                }),
             };
 
             output.push_str(&format!(
                 "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"{}\",LANGUAGE=\"{}\",NAME=\"{}\",DEFAULT={},AUTOSELECT=YES,URI=\"{}\"\n",
-                group_id, language_rfc, name, default, uri
+                group_id, language_rfc, name, default, uri.encode_url()
             ));
         }
         output.push_str("\n");
@@ -135,11 +155,19 @@ pub fn generate_master_playlist(index: &StreamIndex, prefix: &str) -> String {
             let group_id = "subs";
             let name = format!("{} Subtitles", language.to_uppercase());
             let default = if i == 0 { "YES" } else { "NO" };
-            let uri = format!("{}/s/{}.m3u8", base_name, sub.stream_index);
+            let uri = crate::url::HlsUrl {
+                video_url: video_url.to_string(),
+                session_id: session_id.map(|s| s.to_string()),
+                url_type: crate::url::UrlType::Playlist(crate::url::Playlist {
+                    track_id: sub.stream_index,
+                    audio_track_id: None,
+                    audio_transcode_to: None,
+                }),
+            };
 
             output.push_str(&format!(
                 "#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID=\"{}\",LANGUAGE=\"{}\",NAME=\"{}\",DEFAULT={},AUTOSELECT={},FORCED=NO,URI=\"{}\"\n",
-                group_id, language_rfc, name, default, default, uri
+                group_id, language_rfc, name, default, default, uri.encode_url()
             ));
         }
         output.push_str("\n");
@@ -172,7 +200,83 @@ pub fn generate_master_playlist(index: &StreamIndex, prefix: &str) -> String {
             groups
         };
 
-        if audio_groups.is_empty() {
+        // Check if we should use interleaved mode (single muxed A/V playlist)
+        // Subtitles are allowed as separate text tracks
+        let use_interleaved =
+            interleaved && index.video_streams.len() == 1 && index.audio_streams.len() == 1;
+
+        if use_interleaved {
+            // Single interleaved audio-video playlist
+            // Subtitles are handled as a separate MEDIA group
+            let audio = &index.audio_streams[0];
+            let video_idx = video.stream_index;
+            let audio_idx = audio.stream_index;
+
+            // Report AAC codec if transcoding, otherwise report source codec
+            let audio_codec_str = if force_aac {
+                "mp4a.40.2" // AAC codec for transcoded audio
+            } else {
+                match audio.codec_id {
+                    ffmpeg_next::codec::Id::AAC => "mp4a.40.2",
+                    ffmpeg_next::codec::Id::AC3 => "ac-3",
+                    ffmpeg_next::codec::Id::EAC3 => "ec-3",
+                    ffmpeg_next::codec::Id::MP3 => "mp4a.40.34",
+                    ffmpeg_next::codec::Id::OPUS => "Opus",
+                    _ => "mp4a.40.2",
+                }
+            };
+
+            let has_subs = !index.subtitle_streams.is_empty();
+            let video_codec_str = build_codec_attribute(
+                Some(video.codec_id),
+                video.width,
+                video.height,
+                video.bitrate,
+                video.profile,
+                video.level,
+                &[],
+                false,
+            );
+
+            let mut codec_list = Vec::new();
+            if let Some(vc) = video_codec_str {
+                codec_list.push(vc);
+            }
+            codec_list.push(audio_codec_str.to_string());
+            if has_subs {
+                codec_list.push("wvtt".to_string());
+            }
+            let codecs = codec_list.join(",");
+
+            let bandwidth =
+                calculate_bandwidth(video.bitrate.max(100_000), &[audio.bitrate as u32]);
+
+            let subtitle_attr = if has_subs {
+                ",SUBTITLES=\"subs\"".to_string()
+            } else {
+                String::new()
+            };
+
+            let uri = crate::url::HlsUrl {
+                video_url: video_url.to_string(),
+                session_id: session_id.map(|s| s.to_string()),
+                url_type: crate::url::UrlType::Playlist(crate::url::Playlist {
+                    track_id: video_idx,
+                    audio_track_id: Some(audio_idx),
+                    audio_transcode_to: if force_aac {
+                        Some("aac".to_string())
+                    } else {
+                        None
+                    },
+                }),
+            };
+
+            output.push_str(&format!(
+                "#EXT-X-STREAM-INF:BANDWIDTH={},RESOLUTION={},CODECS=\"{}\"{}\n",
+                bandwidth, resolution, codecs, subtitle_attr
+            ));
+            output.push_str(&format!("{}\n", uri.encode_url()));
+        } else if audio_groups.is_empty() {
             // No audio: single variant with only video codec
             let codecs = build_codec_attribute(
                 Some(video.codec_id),
@@ -189,11 +293,21 @@ pub fn generate_master_playlist(index: &StreamIndex, prefix: &str) -> String {
                 .map(|c| format!(",CODECS=\"{}\"", c))
                 .unwrap_or_default();
 
+            let uri = crate::url::HlsUrl {
+                video_url: video_url.to_string(),
+                session_id: session_id.map(|s| s.to_string()),
+                url_type: crate::url::UrlType::Playlist(crate::url::Playlist {
+                    track_id: video.stream_index,
+                    audio_track_id: None,
+                    audio_transcode_to: None,
+                }),
+            };
+
             output.push_str(&format!(
                 "#EXT-X-STREAM-INF:BANDWIDTH={},RESOLUTION={}{}{}\n",
                 bandwidth, resolution, subtitle_attr, codec_attr
             ));
-            output.push_str(&format!("{}/v/media.m3u8\n", base_name));
+            output.push_str(&format!("{}\n", uri.encode_url()));
         } else {
             // One variant per audio codec group
             for group_id in &audio_groups {
@@ -233,11 +347,21 @@ pub fn generate_master_playlist(index: &StreamIndex, prefix: &str) -> String {
                 let bandwidth =
                     calculate_bandwidth(video.bitrate.max(100_000), &group_audio_bitrates);
 
+                let uri = crate::url::HlsUrl {
+                    video_url: video_url.to_string(),
+                    session_id: session_id.map(|s| s.to_string()),
+                    url_type: crate::url::UrlType::Playlist(crate::url::Playlist {
+                        track_id: video.stream_index,
+                        audio_track_id: None,
+                        audio_transcode_to: None,
+                    }),
+                };
+
                 output.push_str(&format!(
                     "#EXT-X-STREAM-INF:BANDWIDTH={},RESOLUTION={},AUDIO=\"{}\",CODECS=\"{}\"{}\n",
                     bandwidth, resolution, group_id, codecs, subtitle_attr
                 ));
-                output.push_str(&format!("{}/v/media.m3u8\n", base_name));
+                output.push_str(&format!("{}\n", uri.encode_url()));
             }
         }
     }
@@ -284,24 +408,24 @@ mod tests {
     #[test]
     fn test_generate_master_playlist() {
         let index = create_test_index();
-        let playlist = generate_master_playlist(&index, "video.mp4");
+        let playlist = generate_master_playlist(&index, "video.mp4", None, false, false);
 
         assert!(playlist.contains("#EXTM3U"));
         assert!(playlist.contains("#EXT-X-VERSION:7"));
         assert!(playlist.contains("#EXT-X-STREAM-INF"));
         assert!(playlist.contains("BANDWIDTH="));
         assert!(playlist.contains("RESOLUTION=1920x1080"));
-        assert!(playlist.contains("video.mp4/v/media.m3u8"));
+        assert!(playlist.contains("video.mp4/t.0.m3u8"));
     }
 
     #[test]
     fn test_generate_master_playlist_with_audio() {
         let index = create_test_index();
-        let playlist = generate_master_playlist(&index, "video.mp4");
+        let playlist = generate_master_playlist(&index, "video.mp4", None, false, false);
 
         assert!(playlist.contains("TYPE=AUDIO"));
         assert!(playlist.contains("LANGUAGE=\"en\""));
-        assert!(playlist.contains("video.mp4/a/1.m3u8"));
+        assert!(playlist.contains("video.mp4/t.1.m3u8"));
     }
 
     #[test]
@@ -318,10 +442,65 @@ mod tests {
             start_time: 0,
         });
 
-        let playlist = generate_master_playlist(&index, "video.mp4");
+        let playlist = generate_master_playlist(&index, "video.mp4", None, false, false);
 
         assert!(playlist.contains("TYPE=SUBTITLES"));
-        assert!(playlist.contains("video.mp4/s/2.m3u8"));
+        assert!(playlist.contains("video.mp4/t.2.m3u8"));
         assert!(playlist.contains("CODECS=\"avc1.640028,mp4a.40.2,wvtt\""));
+    }
+
+    #[test]
+    fn test_generate_master_playlist_interleaved() {
+        let index = create_test_index();
+        let playlist = generate_master_playlist(&index, "video.mp4", None, true, false);
+
+        assert!(playlist.contains("#EXTM3U"));
+        assert!(playlist.contains("#EXT-X-VERSION:7"));
+        assert!(playlist.contains("#EXT-X-STREAM-INF"));
+        assert!(playlist.contains("BANDWIDTH="));
+        assert!(playlist.contains("RESOLUTION=1920x1080"));
+        // Should use interleaved playlist (t.0+1.m3u8) instead of separate audio/video
+        assert!(playlist.contains("video.mp4/t.0+1.m3u8"));
+        assert!(!playlist.contains("TYPE=AUDIO")); // No separate audio entries
+    }
+
+    #[test]
+    fn test_generate_master_playlist_interleaved_with_subtitles() {
+        let mut index = create_test_index();
+        index.subtitle_streams.push(SubtitleStreamInfo {
+            stream_index: 2,
+            codec_id: ffmpeg::codec::Id::SUBRIP,
+            language: Some("en".to_string()),
+            format: SubtitleFormat::SubRip,
+            non_empty_sequences: Vec::new(),
+            sample_index: Vec::new(),
+            timebase: ffmpeg::Rational::new(1, 1000),
+            start_time: 0,
+        });
+
+        let playlist = generate_master_playlist(&index, "video.mp4", None, true, false);
+
+        assert!(playlist.contains("#EXTM3U"));
+        assert!(playlist.contains("video.mp4/t.0+1.m3u8"));
+        assert!(!playlist.contains("TYPE=AUDIO")); // No separate audio entries
+                                                   // Should have subtitles as separate MEDIA entries
+        assert!(playlist.contains("TYPE=SUBTITLES"));
+        assert!(playlist.contains("SUBTITLES=\"subs\"")); // Stream should reference subtitle group
+        assert!(playlist.contains("CODECS=\"")); // Should include wvtt in codecs
+    }
+
+    #[test]
+    fn test_generate_master_playlist_interleaved_force_aac() {
+        let index = create_test_index();
+        let playlist = generate_master_playlist(&index, "video.mp4", None, true, true);
+
+        assert!(playlist.contains("#EXTM3U"));
+        assert!(playlist.contains("#EXT-X-VERSION:7"));
+        assert!(playlist.contains("#EXT-X-STREAM-INF"));
+        // Should use interleaved playlist with -aac suffix
+        assert!(playlist.contains("video.mp4/t.0+1-aac.m3u8"));
+        // Should report AAC codec
+        assert!(playlist.contains("CODECS=\"avc1.640028,mp4a.40.2\""));
+        assert!(!playlist.contains("TYPE=AUDIO")); // No separate audio entries
     }
 }

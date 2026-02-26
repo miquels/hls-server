@@ -162,6 +162,114 @@ pub(crate) fn generate_audio_init_segment(
     Ok(Bytes::from(data))
 }
 
+/// Generate an interleaved audio-video initialization segment
+pub(crate) fn generate_interleaved_init_segment(
+    index: &StreamIndex,
+    video_idx: usize,
+    audio_idx: usize,
+    force_aac: bool,
+) -> Result<Bytes> {
+    use crate::transcode::encoder::{get_recommended_bitrate, AacEncoder};
+    use crate::transcode::resampler::HLS_SAMPLE_RATE;
+
+    if index.video_streams.is_empty() || index.audio_streams.is_empty() {
+        return Err(HlsError::StreamNotFound(
+            "Interleaved segment requires both video and audio streams".to_string(),
+        ));
+    }
+
+    // Only transcode if explicitly requested via force_aac parameter
+    let needs_transcode = force_aac;
+
+    let input = index.get_context()?;
+    let mut muxer = Fmp4Muxer::new()?;
+
+    let mut has_video = false;
+    let mut has_audio = false;
+
+    for stream in input.streams() {
+        let params = stream.parameters();
+        let codec_id = params.id();
+        let idx = stream.index();
+
+        if crate::ffmpeg_utils::utils::is_video_codec(codec_id) {
+            if idx == video_idx {
+                muxer.add_video_stream(&params, idx)?;
+                has_video = true;
+            }
+        } else if crate::ffmpeg_utils::utils::is_audio_codec(codec_id) {
+            if idx == audio_idx {
+                if needs_transcode {
+                    // Use AAC encoder parameters instead of source
+                    let audio_info = index
+                        .audio_streams
+                        .iter()
+                        .find(|a| a.stream_index == audio_idx);
+                    let bitrate = get_recommended_bitrate(
+                        audio_info.map(|a| a.channels).unwrap_or(2),
+                    );
+                    let encoder = AacEncoder::open(HLS_SAMPLE_RATE, 2, bitrate)?;
+                    muxer.add_audio_stream(&encoder.codec_parameters(), idx)?;
+                } else {
+                    muxer.add_audio_stream(&params, idx)?;
+                }
+                has_audio = true;
+            }
+        }
+    }
+
+    // Check if we found the requested streams
+    if !has_video || !has_audio {
+        return Err(HlsError::StreamNotFound(
+            "Specified video or audio stream not found".to_string(),
+        ));
+    }
+
+    let mut data = muxer.write_header(false)?;
+
+    // Calculate default duration for video trex
+    let mut default_duration = 3000; // Default fallback (30fps)
+    if let Some(video_info) = index.video_streams.first() {
+        let fps = video_info.framerate;
+        if fps.numerator() > 0 {
+            default_duration =
+                (90000 * fps.denominator() as u64 / fps.numerator() as u64) as u32;
+        }
+    }
+
+    fix_trex_durations(&mut data, default_duration);
+
+    Ok(Bytes::from(data))
+}
+
+/// Generate an interleaved audio-video media segment
+pub(crate) fn generate_interleaved_segment(
+    index: &StreamIndex,
+    video_idx: usize,
+    audio_idx: usize,
+    segment: &SegmentInfo,
+    _source_path: &Path,
+    force_aac: bool,
+) -> Result<Bytes> {
+    if index.video_streams.is_empty() || index.audio_streams.is_empty() {
+        return Err(HlsError::StreamNotFound(
+            "Interleaved segment requires both video and audio streams".to_string(),
+        ));
+    }
+
+    // Only transcode if explicitly requested via force_aac parameter
+    let needs_transcode = force_aac;
+
+    generate_media_segment_ffmpeg(
+        segment,
+        "av",
+        Some(video_idx),
+        Some(audio_idx),
+        needs_transcode,
+        index,
+    )
+}
+
 /// Fix default_sample_duration in trex boxes
 /// FFmpeg with stream copy sets duration to 1, but players need reasonable values
 fn fix_trex_durations(data: &mut Vec<u8>, duration: u32) {
@@ -245,7 +353,7 @@ pub(crate) fn generate_video_segment(
             sequence,
         })?;
 
-    generate_media_segment_ffmpeg(segment, "video", Some(track_index), index)
+    generate_media_segment_ffmpeg(segment, "video", Some(track_index), None, false, index)
 }
 
 /// Generate an audio segment
@@ -290,7 +398,7 @@ pub(crate) fn generate_audio_segment(
 
         generate_transcoded_audio_segment(index, audio_info, segment)
     } else {
-        generate_media_segment_ffmpeg(segment, "audio", Some(track_index), index)
+        generate_media_segment_ffmpeg(segment, "audio", None, Some(track_index), false, index)
     }
 }
 
@@ -678,9 +786,17 @@ pub fn read_first_display_pts(data: &[u8]) -> Option<i64> {
 fn generate_media_segment_ffmpeg(
     segment: &SegmentInfo,
     segment_type: &str,
-    target_track_index: Option<usize>,
+    video_track_index: Option<usize>,
+    audio_track_index: Option<usize>,
+    audio_needs_transcoding: bool,
     index: &StreamIndex,
 ) -> Result<Bytes> {
+    use crate::transcode::encoder::{get_recommended_bitrate, AacEncoder};
+    use crate::transcode::resampler::HLS_SAMPLE_RATE;
+
+    // For interleaved segments, we need to mux both audio and video
+    let is_interleaved = segment_type == "av";
+
     let mut input = index.get_context()?;
 
     let mut muxer = Fmp4Muxer::new()?;
@@ -688,37 +804,69 @@ fn generate_media_segment_ffmpeg(
     // We will strip the init segment and returns only the fragments.
     // However, Fmp4Muxer writes header upon write_header call.
 
-    // Find relevant stream
-    let mut stream_index = None;
+    // Find relevant stream(s)
+    let mut stream_indices = Vec::new();
     for stream in input.streams() {
         let params = stream.parameters();
         let codec_id = params.id();
         let idx = stream.index();
 
-        if let Some(target) = target_track_index {
-            if idx != target {
-                continue;
+        if is_interleaved {
+            // Add both video and audio streams
+            if let Some(video_idx) = video_track_index {
+                if idx == video_idx && crate::ffmpeg_utils::utils::is_video_codec(codec_id) {
+                    muxer.add_video_stream(&params, idx)?;
+                    stream_indices.push(idx);
+                }
             }
-        }
+            if let Some(audio_idx) = audio_track_index {
+                if idx == audio_idx && crate::ffmpeg_utils::utils::is_audio_codec(codec_id) {
+                    if audio_needs_transcoding {
+                        // Use AAC encoder parameters for transcoded audio
+                        let audio_info = index
+                            .audio_streams
+                            .iter()
+                            .find(|a| a.stream_index == audio_idx);
+                        let bitrate = get_recommended_bitrate(
+                            audio_info.map(|a| a.channels).unwrap_or(2),
+                        );
+                        let encoder = AacEncoder::open(HLS_SAMPLE_RATE, 2, bitrate)?;
+                        muxer.add_audio_stream(&encoder.codec_parameters(), idx)?;
+                    } else {
+                        muxer.add_audio_stream(&params, idx)?;
+                    }
+                    stream_indices.push(idx);
+                }
+            }
+        } else {
+            let is_video =
+                segment_type == "video" && crate::ffmpeg_utils::utils::is_video_codec(codec_id);
+            let is_audio =
+                segment_type == "audio" && crate::ffmpeg_utils::utils::is_audio_codec(codec_id);
 
-        let is_video =
-            segment_type == "video" && crate::ffmpeg_utils::utils::is_video_codec(codec_id);
-        let is_audio =
-            segment_type == "audio" && crate::ffmpeg_utils::utils::is_audio_codec(codec_id);
-
-        if is_video {
-            muxer.add_video_stream(&params, idx)?;
-            stream_index = Some(idx);
-            break;
-        } else if is_audio {
-            muxer.add_audio_stream(&params, idx)?;
-            stream_index = Some(idx);
-            break;
+            if is_video || is_audio {
+                if let Some(target) = video_track_index.or(audio_track_index) {
+                    if idx != target {
+                        continue;
+                    }
+                }
+                if is_video {
+                    muxer.add_video_stream(&params, idx)?;
+                } else {
+                    muxer.add_audio_stream(&params, idx)?;
+                }
+                stream_indices.push(idx);
+                break;
+            }
         }
     }
 
-    let stream_idx = stream_index
-        .ok_or_else(|| HlsError::StreamNotFound(format!("No {} stream found", segment_type)))?;
+    if stream_indices.is_empty() {
+        return Err(HlsError::StreamNotFound(format!(
+            "No {} stream found",
+            segment_type
+        )));
+    }
 
     // Write header WITHOUT delay_moov for video segments.
     // delay_moov causes FFmpeg to emit a pre-roll moof[0] containing B-frames with
@@ -742,7 +890,7 @@ fn generate_media_segment_ffmpeg(
     // the first packet of the stream — the universal FFmpeg approach that works
     // for any container (MP4, MKV, etc.) and any codec (AAC, Opus, Vorbis, etc.).
     let encoder_delay: i64 = if segment_type == "audio" {
-        if let Some(target) = target_track_index {
+        if let Some(target) = audio_track_index {
             index
                 .audio_streams
                 .iter()
@@ -801,8 +949,17 @@ fn generate_media_segment_ffmpeg(
     // first sample — no rounding discrepancy, no "Decreasing DTS" errors.
     let mut first_packet_dts: Option<i64> = None;
     for (stream, mut packet) in input.packets() {
-        if stream.index() != stream_idx {
-            continue;
+        // For interleaved mode, accept both video and audio streams
+        // For single-stream mode, only accept the target stream
+        if is_interleaved {
+            if !stream_indices.contains(&stream.index()) {
+                continue;
+            }
+        } else {
+            let stream_idx = stream_indices[0];
+            if stream.index() != stream_idx {
+                continue;
+            }
         }
 
         let pts = packet.pts().or(packet.dts()).unwrap_or(0);
@@ -834,6 +991,9 @@ fn generate_media_segment_ffmpeg(
             end_pts_90k
         );
 
+        // For interleaved mode, use video stream for segment boundary detection
+        let is_video_stream = crate::ffmpeg_utils::utils::is_video_codec(stream.parameters().id());
+        
         // Video-specific segment boundary logic.
         //
         // Segment boundaries are defined by keyframe DTS values. For video:
@@ -847,7 +1007,8 @@ fn generate_media_segment_ffmpeg(
         // Using DTS (not PTS) is correct: pre-roll B-frames always have DTS < keyframe DTS.
         //
         // Audio uses PTS-based filtering (below) since it has no B-frames.
-        if segment_type == "video" {
+        // For interleaved mode, video controls boundaries, audio follows.
+        if segment_type == "video" || (is_interleaved && is_video_stream) {
             let is_keyframe = packet.is_key();
             if is_keyframe && dts_90k >= end_pts_90k {
                 tracing::debug!(
@@ -862,11 +1023,24 @@ fn generate_media_segment_ffmpeg(
             }
         } else {
             // Audio: simple PTS-based range filter
-            if pts_90k >= end_pts_90k {
-                break;
-            }
-            if pts_90k < start_pts_90k {
-                continue;
+            // For interleaved mode, audio packets within video boundaries are included
+            if !is_interleaved {
+                if pts_90k >= end_pts_90k {
+                    break;
+                }
+                if pts_90k < start_pts_90k {
+                    continue;
+                }
+            } else {
+                // In interleaved mode, audio follows video boundaries
+                if pts_90k >= end_pts_90k {
+                    // Allow some slack for audio to ensure we have audio coverage
+                    // Audio packets slightly beyond video end may be needed
+                    break;
+                }
+                if pts_90k < start_pts_90k {
+                    continue;
+                }
             }
         }
 
@@ -983,8 +1157,14 @@ fn generate_media_segment_ffmpeg(
         // For audio, it's the sample rate (e.g. 48000, 44100).
         // We must use the timebase that the MUXER used for writing packets, otherwise
         // we'll patch a 90kHz value into a 48kHz track or vice-versa.
-        let output_timebase = muxer.get_output_timebase(stream_idx).unwrap_or_else(|| {
-            if segment_type == "video" {
+        // For interleaved mode, use the video stream's output timebase.
+        let stream_idx_for_tb = if is_interleaved {
+            video_track_index.unwrap_or(stream_indices[0])
+        } else {
+            stream_indices[0]
+        };
+        let output_timebase = muxer.get_output_timebase(stream_idx_for_tb).unwrap_or_else(|| {
+            if segment_type == "video" || is_interleaved {
                 ffmpeg::Rational(1, 90000)
             } else {
                 // Fallback for audio if unknown? detailed in scanner?

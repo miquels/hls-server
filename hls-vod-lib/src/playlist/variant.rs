@@ -21,14 +21,26 @@ pub(crate) fn generate_video_playlist(index: &StreamIndex) -> String {
     output.push_str("#EXT-X-PLAYLIST-TYPE:VOD\n");
     output.push_str("#EXT-X-INDEPENDENT-SEGMENTS\n");
     let video_index = index.primary_video().map(|v| v.stream_index).unwrap_or(0);
+    let init_seg = crate::url::VideoSegment {
+        track_id: video_index,
+        audio_track_id: None,
+        audio_transcode_to: None,
+        segment_id: None,
+    };
     // EXT-X-MAP points to video init segment
-    output.push_str(&format!("#EXT-X-MAP:URI=\"{}.init.mp4\"\n", video_index));
+    output.push_str(&format!("#EXT-X-MAP:URI=\"{}\"\n", init_seg));
     output.push_str("\n");
 
     // Generate segment entries
     for segment in &index.segments {
+        let seg = crate::url::VideoSegment {
+            track_id: video_index,
+            audio_track_id: None,
+            audio_transcode_to: None,
+            segment_id: Some(segment.sequence),
+        };
         output.push_str(&format!("#EXTINF:{:.3},\n", segment.duration_secs));
-        output.push_str(&format!("{}.{}.m4s\n", video_index, segment.sequence));
+        output.push_str(&format!("{}\n", seg));
     }
 
     // End list
@@ -58,22 +70,93 @@ pub(crate) fn generate_audio_playlist(
     output.push_str("#EXT-X-PLAYLIST-TYPE:VOD\n");
     output.push_str("#EXT-X-INDEPENDENT-SEGMENTS\n");
 
-    let suffix = if force_aac { "-aac" } else { "" };
+    let init_seg = crate::url::AudioSegment {
+        track_id: track_index,
+        transcode_to: if force_aac {
+            Some("aac".to_string())
+        } else {
+            None
+        },
+        segment_id: None,
+    };
 
     // EXT-X-MAP points to init segment for CMAF-style HLS
-    output.push_str(&format!(
-        "#EXT-X-MAP:URI=\"{}{}.init.mp4\"\n",
-        track_index, suffix
-    ));
+    output.push_str(&format!("#EXT-X-MAP:URI=\"{}\"\n", init_seg));
     output.push_str("\n");
 
     // Generate segment entries
     for segment in &index.segments {
+        let seg = crate::url::AudioSegment {
+            track_id: track_index,
+            transcode_to: if force_aac {
+                Some("aac".to_string())
+            } else {
+                None
+            },
+            segment_id: Some(segment.sequence),
+        };
         output.push_str(&format!("#EXTINF:{:.3},\n", segment.duration_secs));
-        output.push_str(&format!(
-            "{}{}.{}.m4s\n",
-            track_index, suffix, segment.sequence
-        ));
+        output.push_str(&format!("{}\n", seg));
+    }
+
+    // End list
+    output.push_str("#EXT-X-ENDLIST\n");
+
+    output
+}
+
+/// Generate interleaved audio-video variant playlist
+///
+/// Creates v/<video_idx>.<audio_idx>.media.m3u8 with references to muxed A/V segments
+/// If `force_aac` is true, the audio will be transcoded to AAC and URLs include `-aac` suffix
+pub(crate) fn generate_interleaved_playlist(
+    index: &StreamIndex,
+    video_idx: usize,
+    audio_idx: usize,
+    force_aac: bool,
+) -> String {
+    let mut output = String::new();
+
+    // Calculate target duration
+    let target_duration = calculate_target_duration(&index.segments);
+
+    // Header
+    output.push_str("#EXTM3U\n");
+    output.push_str("#EXT-X-VERSION:7\n");
+    output.push_str(&format!("#EXT-X-TARGETDURATION:{}\n", target_duration));
+    output.push_str("#EXT-X-MEDIA-SEQUENCE:0\n");
+    output.push_str("#EXT-X-PLAYLIST-TYPE:VOD\n");
+    output.push_str("#EXT-X-INDEPENDENT-SEGMENTS\n");
+
+    let init_seg = crate::url::VideoSegment {
+        track_id: video_idx,
+        audio_track_id: Some(audio_idx),
+        audio_transcode_to: if force_aac {
+            Some("aac".to_string())
+        } else {
+            None
+        },
+        segment_id: None,
+    };
+
+    // EXT-X-MAP points to interleaved init segment
+    output.push_str(&format!("#EXT-X-MAP:URI=\"{}\"\n", init_seg));
+    output.push_str("\n");
+
+    // Generate segment entries
+    for segment in &index.segments {
+        let seg = crate::url::VideoSegment {
+            track_id: video_idx,
+            audio_track_id: Some(audio_idx),
+            audio_transcode_to: if force_aac {
+                Some("aac".to_string())
+            } else {
+                None
+            },
+            segment_id: Some(segment.sequence),
+        };
+        output.push_str(&format!("#EXTINF:{:.3},\n", segment.duration_secs));
+        output.push_str(&format!("{}\n", seg));
     }
 
     // End list
@@ -183,8 +266,13 @@ pub(crate) fn generate_subtitle_playlist(index: &StreamIndex, track_index: usize
     output.push_str("\n");
 
     for (start_s, end_s, dur) in merged_segments {
+        let seg = crate::url::VttSegment {
+            track_id: track_index,
+            start_cue: start_s,
+            end_cue: end_s,
+        };
         output.push_str(&format!("#EXTINF:{:.6},\n", dur));
-        output.push_str(&format!("{}.{}-{}.vtt\n", track_index, start_s, end_s));
+        output.push_str(&format!("{}\n", seg));
     }
 
     // End list

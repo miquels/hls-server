@@ -32,6 +32,7 @@ pub(crate) mod segment;
 pub(crate) mod subtitle;
 pub(crate) mod transcode;
 pub(crate) mod types;
+pub mod url;
 
 #[cfg(test)]
 pub(crate) mod tests;
@@ -40,3 +41,4 @@ pub use api::*;
 pub use error::{FfmpegError, HlsError, Result};
 pub use ffmpeg_utils::version_info as ffmpeg_version_info;
 pub use ffmpeg_utils::{init, install_log_filter};
+pub use url::*;
