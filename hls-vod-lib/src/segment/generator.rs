@@ -197,23 +197,21 @@ pub(crate) fn generate_interleaved_init_segment(
                 muxer.add_video_stream(&params, idx)?;
                 has_video = true;
             }
-        } else if crate::ffmpeg_utils::utils::is_audio_codec(codec_id)
-            && idx == audio_idx {
-                if needs_transcode {
-                    // Use AAC encoder parameters instead of source
-                    let audio_info = index
-                        .audio_streams
-                        .iter()
-                        .find(|a| a.stream_index == audio_idx);
-                    let bitrate =
-                        get_recommended_bitrate(audio_info.map(|a| a.channels).unwrap_or(2));
-                    let encoder = AacEncoder::open(HLS_SAMPLE_RATE, 2, bitrate)?;
-                    muxer.add_audio_stream(&encoder.codec_parameters(), idx)?;
-                } else {
-                    muxer.add_audio_stream(&params, idx)?;
-                }
-                has_audio = true;
+        } else if crate::ffmpeg_utils::utils::is_audio_codec(codec_id) && idx == audio_idx {
+            if needs_transcode {
+                // Use AAC encoder parameters instead of source
+                let audio_info = index
+                    .audio_streams
+                    .iter()
+                    .find(|a| a.stream_index == audio_idx);
+                let bitrate = get_recommended_bitrate(audio_info.map(|a| a.channels).unwrap_or(2));
+                let encoder = AacEncoder::open(HLS_SAMPLE_RATE, 2, bitrate)?;
+                muxer.add_audio_stream(&encoder.codec_parameters(), idx)?;
+            } else {
+                muxer.add_audio_stream(&params, idx)?;
             }
+            has_audio = true;
+        }
     }
 
     // Check if we found the requested streams
@@ -340,16 +338,7 @@ pub(crate) fn generate_video_segment(
     sequence: usize,
     _source_path: &Path,
 ) -> Result<Bytes> {
-    let segment = index
-        .segments
-        .iter()
-        .find(|s| s.sequence == sequence)
-        .ok_or_else(|| HlsError::SegmentNotFound {
-            stream_id: index.stream_id.clone(),
-            segment_type: "video".to_string(),
-            sequence,
-        })?;
-
+    let segment = index.get_segment("video", sequence)?;
     generate_media_segment_ffmpeg(segment, "video", Some(track_index), None, false, index)
 }
 
@@ -366,15 +355,7 @@ pub(crate) fn generate_audio_segment(
 ) -> Result<Bytes> {
     use crate::transcode::pipeline::needs_transcoding;
 
-    let segment = index
-        .segments
-        .iter()
-        .find(|s| s.sequence == sequence)
-        .ok_or_else(|| HlsError::SegmentNotFound {
-            stream_id: index.stream_id.clone(),
-            segment_type: "audio".to_string(),
-            sequence,
-        })?;
+    let segment = index.get_segment("audio", sequence)?;
 
     // Check if this track needs transcoding
     let needs_transcode = index

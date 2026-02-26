@@ -123,24 +123,16 @@ impl SegmentCache {
     }
 
     /// Generate cache key from components
-    pub fn make_key(stream_id: &str, segment_type: &str, sequence: usize) -> String {
-        format!("{}:{}:{}", stream_id, segment_type, sequence)
+    pub fn make_key(stream_id: &str, segment_key: &str) -> String {
+        format!("{}:{}", stream_id, segment_key)
     }
 
     /// Get a cached segment
-    pub fn get(
-        &self,
-        stream_id: &str,
-        segment_type: &str,
-        sequence: usize,
-        touch: bool,
-    ) -> Option<Bytes> {
-        let key = Self::make_key(stream_id, segment_type, sequence);
+    pub fn get(&self, stream_id: &str, segment_key: &str) -> Option<Bytes> {
+        let key = Self::make_key(stream_id, segment_key);
 
         if let Some(mut entry) = self.entries.get_mut(&key) {
-            if touch {
-                entry.touch();
-            }
+            entry.touch();
             Some(entry.data.clone())
         } else {
             None
@@ -148,14 +140,14 @@ impl SegmentCache {
     }
 
     #[allow(dead_code)]
-    pub fn contains(&self, stream_id: &str, segment_type: &str, sequence: usize) -> bool {
-        let key = Self::make_key(stream_id, segment_type, sequence);
+    pub fn contains(&self, stream_id: &str, segment_key: &str) -> bool {
+        let key = Self::make_key(stream_id, segment_key);
         self.entries.contains_key(&key)
     }
 
     /// Cache a segment
-    pub fn insert(&self, stream_id: &str, segment_type: &str, sequence: usize, data: Bytes) {
-        let key = Self::make_key(stream_id, segment_type, sequence);
+    pub fn insert(&self, stream_id: &str, segment_key: &str, data: Bytes) {
+        let key = Self::make_key(stream_id, segment_key);
         let size = data.len();
 
         // Check memory limit before inserting
@@ -310,42 +302,42 @@ mod tests {
         let cache = SegmentCache::new(SegmentCacheConfig::default());
         let data = Bytes::from("segment data");
 
-        cache.insert("stream1", "video", 0, data.clone());
+        cache.insert("stream1", "video:0", data.clone());
 
-        assert!(cache.contains("stream1", "video", 0));
-        assert_eq!(cache.get("stream1", "video", 0, true), Some(data));
+        assert!(cache.contains("stream1", "video:0"));
+        assert_eq!(cache.get("stream1", "video:0"), Some(data));
     }
 
     #[test]
     fn test_cache_miss() {
         let cache = SegmentCache::new(SegmentCacheConfig::default());
 
-        assert!(!cache.contains("stream1", "video", 0));
-        assert_eq!(cache.get("stream1", "video", 0, true), None);
+        assert!(!cache.contains("stream1", "video:0"));
+        assert_eq!(cache.get("stream1", "video:0"), None);
     }
 
     #[test]
     fn test_cache_remove_stream() {
         let cache = SegmentCache::new(SegmentCacheConfig::default());
 
-        cache.insert("stream1", "video", 0, Bytes::from("v0"));
-        cache.insert("stream1", "video", 1, Bytes::from("v1"));
-        cache.insert("stream1", "audio", 0, Bytes::from("a0"));
-        cache.insert("stream2", "video", 0, Bytes::from("v0"));
+        cache.insert("stream1", "video:0", Bytes::from("v0"));
+        cache.insert("stream1", "video:1", Bytes::from("v1"));
+        cache.insert("stream1", "audio:0", Bytes::from("a0"));
+        cache.insert("stream2", "video:0", Bytes::from("v0"));
 
         cache.remove_stream("stream1");
 
-        assert!(!cache.contains("stream1", "video", 0));
-        assert!(!cache.contains("stream1", "video", 1));
-        assert!(!cache.contains("stream1", "audio", 0));
-        assert!(cache.contains("stream2", "video", 0));
+        assert!(!cache.contains("stream1", "video:0"));
+        assert!(!cache.contains("stream1", "video:1"));
+        assert!(!cache.contains("stream1", "audio:0"));
+        assert!(cache.contains("stream2", "video:0"));
     }
 
     #[test]
     fn test_cache_stats() {
         let cache = SegmentCache::new(SegmentCacheConfig::default());
 
-        cache.insert("stream1", "video", 0, Bytes::from("data"));
+        cache.insert("stream1", "video:0", Bytes::from("data"));
 
         let stats = cache.stats();
         assert_eq!(stats.entry_count, 1);
@@ -354,7 +346,7 @@ mod tests {
 
     #[test]
     fn test_cache_make_key() {
-        let key = SegmentCache::make_key("abc123", "video", 5);
+        let key = SegmentCache::make_key("abc123", "video:5");
         assert_eq!(key, "abc123:video:5");
     }
 
@@ -364,7 +356,7 @@ mod tests {
         assert!(cache.is_empty());
         assert_eq!(cache.len(), 0);
 
-        cache.insert("s1", "v", 0, Bytes::from("x"));
+        cache.insert("s1", "v:0", Bytes::from("x"));
         assert!(!cache.is_empty());
         assert_eq!(cache.len(), 1);
     }

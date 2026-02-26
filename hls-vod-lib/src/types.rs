@@ -349,6 +349,21 @@ impl StreamIndex {
         })
     }
 
+    pub fn get_segment(
+        &self,
+        segment_type: &str,
+        start_sequence: usize,
+    ) -> Result<&'_ SegmentInfo> {
+        self.segments
+            .iter()
+            .find(|s| s.sequence == start_sequence)
+            .ok_or_else(|| HlsError::SegmentNotFound {
+                stream_id: self.stream_id.clone(),
+                segment_type: segment_type.to_string(),
+                sequence: start_sequence,
+            })
+    }
+
     /// Retrieve a context to read the file.
     /// Returns either the locked cached context, or freshly opens the file if none is cached.
     pub fn get_context(&self) -> Result<ContextGuard<'_>> {
@@ -431,21 +446,22 @@ impl StreamIndex {
             // If we filtered out all audio streams, but the source had audio streams,
             // we should transcode all audio streams matching the codec of the primary
             // audio stream to AAC, ONLY IF "aac" or "mp4a.40.2" is in the supported codecs list.
-            if index.audio_streams.is_empty() && !original_audio_streams.is_empty()
+            if index.audio_streams.is_empty()
+                && !original_audio_streams.is_empty()
                 && (codec_strs_lower.contains(&"aac".to_string())
                     || codec_strs_lower.contains(&"mp4a.40.2".to_string()))
+            {
+                let fallback_codec = original_audio_streams[0].codec_id;
+                for mut fallback in original_audio_streams
+                    .into_iter()
+                    .filter(|s| s.codec_id == fallback_codec)
                 {
-                    let fallback_codec = original_audio_streams[0].codec_id;
-                    for mut fallback in original_audio_streams
-                        .into_iter()
-                        .filter(|s| s.codec_id == fallback_codec)
-                    {
-                        fallback.is_transcoded = true;
-                        // Note: We keep the original codec_id in the stream info so the transcoder
-                        // knows what to decode FROM. `TrackInfo` will map `is_transcoded` to "aac".
-                        index.audio_streams.push(fallback);
-                    }
+                    fallback.is_transcoded = true;
+                    // Note: We keep the original codec_id in the stream info so the transcoder
+                    // knows what to decode FROM. `TrackInfo` will map `is_transcoded` to "aac".
+                    index.audio_streams.push(fallback);
                 }
+            }
         }
 
         let media = Arc::new(index);
