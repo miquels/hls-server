@@ -1,12 +1,17 @@
 use crate::error::{HlsError, Result};
 use ffmpeg_next as ffmpeg;
 use std::ops::{Deref, DerefMut};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::sync::MutexGuard;
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
+
+pub use crate::segment::cache::{
+    cache_stats as segment_cache_stats, init_cache as init_segment_cache, SegmentCacheConfig,
+    SegmentCacheStats,
+};
 
 /// A transparent wrapper to access an FFmpeg Input context.
 /// It can either hold a freshly opened context (Owned) or a locked reference to a cached one (Shared).
@@ -21,7 +26,7 @@ impl<'a> Deref for ContextGuard<'a> {
     fn deref(&self) -> &Self::Target {
         match self {
             ContextGuard::Owned(input) => input,
-            ContextGuard::Shared(guard) => &**guard,
+            ContextGuard::Shared(guard) => guard,
         }
     }
 }
@@ -30,7 +35,7 @@ impl<'a> DerefMut for ContextGuard<'a> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         match self {
             ContextGuard::Owned(input) => input,
-            ContextGuard::Shared(guard) => &mut **guard,
+            ContextGuard::Shared(guard) => guard,
         }
     }
 }
@@ -180,6 +185,8 @@ pub struct StreamIndex {
     pub segment_first_pts: Arc<Vec<AtomicI64>>,
     /// Protected cache of the opened FFmpeg format context to avoid reopening the file repeatedly
     pub cached_context: Option<Arc<std::sync::Mutex<ffmpeg::format::context::Input>>>,
+    /// Whether generated segments for this media should be aggressively cached and LRU bumped
+    pub cache_enabled: bool,
 }
 
 impl std::fmt::Debug for StreamIndex {
@@ -223,8 +230,81 @@ impl Clone for StreamIndex {
             last_accessed: AtomicU64::new(self.last_accessed.load(Ordering::Relaxed)),
             segment_first_pts: Arc::clone(&self.segment_first_pts),
             cached_context: self.cached_context.clone(),
+            cache_enabled: self.cache_enabled,
         }
     }
+}
+
+static STREAMS_BY_ID: std::sync::OnceLock<dashmap::DashMap<String, std::sync::Arc<StreamIndex>>> =
+    std::sync::OnceLock::new();
+
+/// Retrieve a tracked media stream by its generated stream ID
+pub fn get_stream_by_id(stream_id: &str) -> Option<std::sync::Arc<StreamIndex>> {
+    STREAMS_BY_ID
+        .get_or_init(dashmap::DashMap::new)
+        .get(stream_id)
+        .map(|r| r.value().clone())
+}
+
+/// Remove a tracked media stream by its generated stream ID
+pub fn remove_stream_by_id(stream_id: &str) {
+    if let Some(_media) = STREAMS_BY_ID
+        .get_or_init(dashmap::DashMap::new)
+        .remove(stream_id)
+    {
+        if let Some(c) = crate::segment::cache::get() {
+            c.remove_stream(stream_id);
+        }
+    }
+}
+
+/// Active stream metadata
+#[derive(serde::Serialize, Clone, Debug)]
+pub struct ActiveStreamInfo {
+    pub stream_id: String,
+    pub path: String,
+    pub duration: f64,
+}
+
+/// Fetch a list of active streams
+pub fn active_streams() -> Vec<ActiveStreamInfo> {
+    STREAMS_BY_ID
+        .get_or_init(dashmap::DashMap::new)
+        .iter()
+        .map(|r| ActiveStreamInfo {
+            stream_id: r.value().stream_id.clone(),
+            path: r.value().source_path.to_string_lossy().to_string(),
+            duration: r.value().duration_secs,
+        })
+        .collect()
+}
+
+/// Remove expired streams from tracking and cache
+pub fn cleanup_expired_streams() -> usize {
+    const STREAM_TIMEOUT_SECS: u64 = 600; // 10 minutes
+
+    let mut streams_to_remove = Vec::new();
+
+    for entry in STREAMS_BY_ID.get_or_init(dashmap::DashMap::new).iter() {
+        if entry.value().time_since_last_access() > STREAM_TIMEOUT_SECS {
+            streams_to_remove.push(entry.key().clone());
+        }
+    }
+
+    let mut count = 0;
+    for stream_id in streams_to_remove {
+        remove_stream_by_id(&stream_id);
+        count += 1;
+    }
+
+    count
+}
+
+#[cfg(test)]
+pub fn register_test_stream(index: std::sync::Arc<StreamIndex>) {
+    STREAMS_BY_ID
+        .get_or_init(dashmap::DashMap::new)
+        .insert(index.stream_id.clone(), index.clone());
 }
 
 impl StreamIndex {
@@ -242,6 +322,7 @@ impl StreamIndex {
             last_accessed: AtomicU64::new(0),
             segment_first_pts: Arc::new(Vec::new()),
             cached_context: None,
+            cache_enabled: true,
         }
     }
 
@@ -284,6 +365,96 @@ impl StreamIndex {
             })?;
             Ok(ContextGuard::Owned(input))
         }
+    }
+
+    pub fn open(
+        path: &Path,
+        codecs: &[impl AsRef<str>],
+        stream_id: Option<String>,
+    ) -> Result<Arc<StreamIndex>> {
+        if let Some(id) = &stream_id {
+            if let Some(media) = get_stream_by_id(id) {
+                media.touch();
+                return Ok(media);
+            }
+        }
+
+        let options = crate::index::scanner::IndexOptions {
+            segment_duration_secs: 4.0,
+            index_segments: true,
+        };
+        let mut index = crate::index::scanner::scan_file_with_options(path, &options)?;
+
+        if let Some(id) = stream_id {
+            index.stream_id = id;
+        }
+
+        // Apply codec filtering if codecs are provided
+        if !codecs.is_empty() {
+            let codec_strs_lower: Vec<String> =
+                codecs.iter().map(|c| c.as_ref().to_lowercase()).collect();
+            let original_audio_streams = index.audio_streams.clone();
+
+            // Filter audio streams
+            index.audio_streams.retain(|a| {
+                let browser_codecs = match a.codec_id {
+                    ffmpeg::codec::Id::AAC => ["mp4a.40.2", "aac"].as_slice(),
+                    ffmpeg::codec::Id::AC3 => ["ac-3", "ac3"].as_slice(),
+                    ffmpeg::codec::Id::EAC3 => ["ec-3", "eac3"].as_slice(),
+                    ffmpeg::codec::Id::MP3 => ["mp4a.40.34", "mp3"].as_slice(),
+                    ffmpeg::codec::Id::OPUS => ["opus"].as_slice(),
+                    _ => [].as_slice(),
+                };
+
+                if browser_codecs
+                    .iter()
+                    .any(|&m| codec_strs_lower.contains(&m.to_string()))
+                {
+                    return true;
+                }
+
+                // Fallback to exact enum match
+                let codec_name = format!("{:?}", a.codec_id).to_lowercase();
+                codec_strs_lower.contains(&codec_name)
+            });
+
+            // Filter subtitle streams (typically 'webvtt' or 'wvtt')
+            index.subtitle_streams.retain(|s| {
+                let codec_name = match s.codec_id {
+                    ffmpeg::codec::Id::WEBVTT => "wvtt",
+                    _ => "",
+                };
+                codec_strs_lower.contains(&codec_name.to_string())
+                    || codec_strs_lower.contains(&"webvtt".to_string())
+            });
+
+            // If we filtered out all audio streams, but the source had audio streams,
+            // we should transcode all audio streams matching the codec of the primary
+            // audio stream to AAC, ONLY IF "aac" or "mp4a.40.2" is in the supported codecs list.
+            if index.audio_streams.is_empty() && !original_audio_streams.is_empty()
+                && (codec_strs_lower.contains(&"aac".to_string())
+                    || codec_strs_lower.contains(&"mp4a.40.2".to_string()))
+                {
+                    let fallback_codec = original_audio_streams[0].codec_id;
+                    for mut fallback in original_audio_streams
+                        .into_iter()
+                        .filter(|s| s.codec_id == fallback_codec)
+                    {
+                        fallback.is_transcoded = true;
+                        // Note: We keep the original codec_id in the stream info so the transcoder
+                        // knows what to decode FROM. `TrackInfo` will map `is_transcoded` to "aac".
+                        index.audio_streams.push(fallback);
+                    }
+                }
+        }
+
+        let media = Arc::new(index);
+
+        STREAMS_BY_ID
+            .get_or_init(dashmap::DashMap::new)
+            .insert(media.stream_id.clone(), media.clone());
+
+        Ok(media)
     }
 
     pub fn primary_video(&self) -> Option<&VideoStreamInfo> {
@@ -336,10 +507,6 @@ impl StreamIndex {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        if now > last {
-            now - last
-        } else {
-            0
-        }
+        now.saturating_sub(last)
     }
 }

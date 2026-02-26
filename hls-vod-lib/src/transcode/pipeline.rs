@@ -210,7 +210,7 @@ pub fn transcode_audio_segment(
     // Calculate the absolute PTS of the FIRST sample after discarding
     let mut aligned_pts_48k = base_pts_48k + discard_samples as i64;
 
-    let channels: u16 = pcm_frames.first().map(|f| f.channels() as u16).unwrap_or(2);
+    let channels: u16 = pcm_frames.first().map(|f| f.channels()).unwrap_or(2);
     let pcm_frames = rechunk_pcm_frames(pcm_frames, AAC_FRAME_SIZE, discard_samples);
 
     let mut encoder = AacEncoder::open(HLS_SAMPLE_RATE, channels, bitrate)?;

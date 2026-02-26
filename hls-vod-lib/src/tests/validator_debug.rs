@@ -32,6 +32,7 @@ mod tests {
             last_accessed: AtomicU64::new(0),
             segment_first_pts: Arc::new(Vec::new()),
             cached_context: None,
+            cache_enabled: true,
         };
 
         let segment = SegmentInfo {

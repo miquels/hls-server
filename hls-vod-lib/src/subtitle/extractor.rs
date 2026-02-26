@@ -64,7 +64,7 @@ impl SubtitleExtractor {
         // For ASS/SSA, we need to parse the ASS format
 
         let pts = packet.pts().unwrap_or(0);
-        let duration = packet.duration() as i64;
+        let duration = packet.duration();
 
         // Get the data from the packet (returns Option<&[u8]>)
         let data = packet.data().unwrap_or(&[]);

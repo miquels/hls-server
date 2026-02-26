@@ -1,7 +1,7 @@
 use std::fmt;
 use std::str::FromStr;
 
-use crate::api::MediaInfo;
+use crate::types::StreamIndex;
 
 /// To work with a HlsUrl:
 ///
@@ -12,7 +12,7 @@ use crate::api::MediaInfo;
 /// let video = map_url_to_file(&hls_url.video)?;
 ///
 /// // Open video file.
-/// let media_info = MediaInfo::open(&video)?;
+/// let media_info = StreamIndex::open(&video)?;
 ///
 /// // Generate playlist or segment.
 /// return hls_url.generate(&media_info);
@@ -193,16 +193,16 @@ impl HlsUrl {
     /// Generate the playlist or segment.
     pub fn generate(
         &self,
-        media_info: &MediaInfo,
+        media_info: &StreamIndex,
         interleaved: bool,
         force_aac: bool,
     ) -> crate::error::Result<Vec<u8>> {
         match &self.url_type {
             UrlType::MainPlaylist => {
                 let playlist = crate::playlist::generate_master_playlist(
-                    &media_info.index,
+                    media_info,
                     &self.video_url,
-                    Some(&media_info.index.stream_id),
+                    Some(&media_info.stream_id),
                     interleaved,
                     force_aac,
                 );
@@ -212,33 +212,30 @@ impl HlsUrl {
                 let playlist = if let Some(audio_idx) = p.audio_track_id {
                     let force_aac_track = p.audio_transcode_to.as_deref() == Some("aac");
                     crate::playlist::variant::generate_interleaved_playlist(
-                        &media_info.index,
+                        media_info,
                         p.track_id,
                         audio_idx,
                         force_aac_track,
                     )
                 } else if media_info
-                    .tracks
+                    .audio_streams
                     .iter()
-                    .any(|t| t.id == format!("a/{}", p.track_id))
+                    .any(|a| a.stream_index == p.track_id)
                 {
                     let force_aac_track = p.audio_transcode_to.as_deref() == Some("aac");
                     crate::playlist::variant::generate_audio_playlist(
-                        &media_info.index,
+                        media_info,
                         p.track_id,
                         force_aac_track,
                     )
                 } else if media_info
-                    .tracks
+                    .subtitle_streams
                     .iter()
-                    .any(|t| t.id == format!("s/{}", p.track_id))
+                    .any(|s| s.stream_index == p.track_id)
                 {
-                    crate::playlist::variant::generate_subtitle_playlist(
-                        &media_info.index,
-                        p.track_id,
-                    )
+                    crate::playlist::variant::generate_subtitle_playlist(media_info, p.track_id)
                 } else {
-                    crate::playlist::variant::generate_video_playlist(&media_info.index)
+                    crate::playlist::variant::generate_video_playlist(media_info)
                 };
                 Ok(playlist.into_bytes())
             }
@@ -253,7 +250,7 @@ impl HlsUrl {
                         };
                         if let Some(c) = crate::segment::cache::get() {
                             if let Some(b) = c.get(
-                                &media_info.index.stream_id,
+                                &media_info.stream_id,
                                 &segment_type,
                                 seq,
                                 media_info.cache_enabled,
@@ -262,28 +259,27 @@ impl HlsUrl {
                             }
                         }
                         let segment = media_info
-                            .index
                             .segments
                             .iter()
                             .find(|s| s.sequence == seq)
                             .ok_or_else(|| crate::error::HlsError::SegmentNotFound {
-                                stream_id: media_info.index.stream_id.clone(),
+                                stream_id: media_info.stream_id.clone(),
                                 segment_type: segment_type.clone(),
                                 sequence: seq,
                             })?;
                         let buf = crate::segment::generator::generate_interleaved_segment(
-                            &media_info.index,
+                            media_info,
                             v.track_id,
                             audio_idx,
                             segment,
-                            &media_info.index.source_path,
+                            &media_info.source_path,
                             force_aac_track,
                         )
                         .map(|b| b.to_vec())?;
                         if media_info.cache_enabled {
                             if let Some(c) = crate::segment::cache::get() {
                                 c.insert(
-                                    &media_info.index.stream_id,
+                                    &media_info.stream_id,
                                     &segment_type,
                                     seq,
                                     bytes::Bytes::from(buf.clone()),
@@ -293,48 +289,46 @@ impl HlsUrl {
                         Ok(buf)
                     } else {
                         crate::segment::generator::generate_interleaved_init_segment(
-                            &media_info.index,
+                            media_info,
                             v.track_id,
                             audio_idx,
                             force_aac_track,
                         )
                         .map(|b| b.to_vec())
                     }
-                } else {
-                    if let Some(seq) = v.segment_id {
-                        let segment_type = "v";
+                } else if let Some(seq) = v.segment_id {
+                    let segment_type = "v";
+                    if let Some(c) = crate::segment::cache::get() {
+                        if let Some(b) = c.get(
+                            &media_info.stream_id,
+                            segment_type,
+                            seq,
+                            media_info.cache_enabled,
+                        ) {
+                            return Ok(b.to_vec());
+                        }
+                    }
+                    let buf = crate::segment::generator::generate_video_segment(
+                        media_info,
+                        v.track_id,
+                        seq,
+                        &media_info.source_path,
+                    )
+                    .map(|b| b.to_vec())?;
+                    if media_info.cache_enabled {
                         if let Some(c) = crate::segment::cache::get() {
-                            if let Some(b) = c.get(
-                                &media_info.index.stream_id,
+                            c.insert(
+                                &media_info.stream_id,
                                 segment_type,
                                 seq,
-                                media_info.cache_enabled,
-                            ) {
-                                return Ok(b.to_vec());
-                            }
+                                bytes::Bytes::from(buf.clone()),
+                            );
                         }
-                        let buf = crate::segment::generator::generate_video_segment(
-                            &media_info.index,
-                            v.track_id,
-                            seq,
-                            &media_info.index.source_path,
-                        )
-                        .map(|b| b.to_vec())?;
-                        if media_info.cache_enabled {
-                            if let Some(c) = crate::segment::cache::get() {
-                                c.insert(
-                                    &media_info.index.stream_id,
-                                    segment_type,
-                                    seq,
-                                    bytes::Bytes::from(buf.clone()),
-                                );
-                            }
-                        }
-                        Ok(buf)
-                    } else {
-                        crate::segment::generator::generate_video_init_segment(&media_info.index)
-                            .map(|b| b.to_vec())
                     }
+                    Ok(buf)
+                } else {
+                    crate::segment::generator::generate_video_init_segment(media_info)
+                        .map(|b| b.to_vec())
                 }
             }
             UrlType::AudioSegment(a) => {
@@ -347,7 +341,7 @@ impl HlsUrl {
                     };
                     if let Some(c) = crate::segment::cache::get() {
                         if let Some(b) = c.get(
-                            &media_info.index.stream_id,
+                            &media_info.stream_id,
                             &segment_type,
                             seq,
                             media_info.cache_enabled,
@@ -356,17 +350,17 @@ impl HlsUrl {
                         }
                     }
                     let buf = crate::segment::generator::generate_audio_segment(
-                        &media_info.index,
+                        media_info,
                         a.track_id,
                         seq,
-                        &media_info.index.source_path,
+                        &media_info.source_path,
                         force_aac_track,
                     )
                     .map(|b| b.to_vec())?;
                     if media_info.cache_enabled {
                         if let Some(c) = crate::segment::cache::get() {
                             c.insert(
-                                &media_info.index.stream_id,
+                                &media_info.stream_id,
                                 &segment_type,
                                 seq,
                                 bytes::Bytes::from(buf.clone()),
@@ -376,7 +370,7 @@ impl HlsUrl {
                     Ok(buf)
                 } else {
                     crate::segment::generator::generate_audio_init_segment(
-                        &media_info.index,
+                        media_info,
                         a.track_id,
                         force_aac_track,
                     )
@@ -387,7 +381,7 @@ impl HlsUrl {
                 let segment_type = format!("s:{}", s.track_id);
                 if let Some(c) = crate::segment::cache::get() {
                     if let Some(b) = c.get(
-                        &media_info.index.stream_id,
+                        &media_info.stream_id,
                         &segment_type,
                         s.start_cue,
                         media_info.cache_enabled,
@@ -396,17 +390,17 @@ impl HlsUrl {
                     }
                 }
                 let buf = crate::segment::generator::generate_subtitle_segment(
-                    &media_info.index,
+                    media_info,
                     s.track_id,
                     s.start_cue,
                     s.end_cue,
-                    &media_info.index.source_path,
+                    &media_info.source_path,
                 )
                 .map(|b| b.to_vec())?;
                 if media_info.cache_enabled {
                     if let Some(c) = crate::segment::cache::get() {
                         c.insert(
-                            &media_info.index.stream_id,
+                            &media_info.stream_id,
                             &segment_type,
                             s.start_cue,
                             bytes::Bytes::from(buf.clone()),
@@ -514,6 +508,6 @@ impl fmt::Display for Playlist {
                 write!(f, "-{}", audio_transcode_to)?;
             }
         }
-        write!(f, "{}", ".m3u8")
+        write!(f, ".m3u8")
     }
 }

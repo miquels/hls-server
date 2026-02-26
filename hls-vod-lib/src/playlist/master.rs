@@ -29,7 +29,7 @@ pub fn generate_master_playlist(
     // Header
     output.push_str("#EXTM3U\n");
     output.push_str("#EXT-X-VERSION:7\n");
-    output.push_str("\n");
+    output.push('\n');
 
     // Stream details collected directly from index
 
@@ -143,7 +143,7 @@ pub fn generate_master_playlist(
                 group_id, language_rfc, name, default, uri.encode_url()
             ));
         }
-        output.push_str("\n");
+        output.push('\n');
     }
 
     // ── Subtitle MEDIA groups ──────────────────────────────────────────────
@@ -170,7 +170,7 @@ pub fn generate_master_playlist(
                 group_id, language_rfc, name, default, default, uri.encode_url()
             ));
         }
-        output.push_str("\n");
+        output.push('\n');
     }
 
     // ── Video Variants ─────────────────────────────────────────────────────

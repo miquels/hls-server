@@ -29,7 +29,7 @@ pub(crate) fn generate_video_playlist(index: &StreamIndex) -> String {
     };
     // EXT-X-MAP points to video init segment
     output.push_str(&format!("#EXT-X-MAP:URI=\"{}\"\n", init_seg));
-    output.push_str("\n");
+    output.push('\n');
 
     // Generate segment entries
     for segment in &index.segments {
@@ -82,7 +82,7 @@ pub(crate) fn generate_audio_playlist(
 
     // EXT-X-MAP points to init segment for CMAF-style HLS
     output.push_str(&format!("#EXT-X-MAP:URI=\"{}\"\n", init_seg));
-    output.push_str("\n");
+    output.push('\n');
 
     // Generate segment entries
     for segment in &index.segments {
@@ -141,7 +141,7 @@ pub(crate) fn generate_interleaved_playlist(
 
     // EXT-X-MAP points to interleaved init segment
     output.push_str(&format!("#EXT-X-MAP:URI=\"{}\"\n", init_seg));
-    output.push_str("\n");
+    output.push('\n');
 
     // Generate segment entries
     for segment in &index.segments {
@@ -263,7 +263,7 @@ pub(crate) fn generate_subtitle_playlist(index: &StreamIndex, track_index: usize
     output.push_str(&format!("#EXT-X-TARGETDURATION:{}\n", target_duration));
     output.push_str("#EXT-X-MEDIA-SEQUENCE:0\n");
     output.push_str("#EXT-X-PLAYLIST-TYPE:VOD\n");
-    output.push_str("\n");
+    output.push('\n');
 
     for (start_s, end_s, dur) in merged_segments {
         let seg = crate::url::VttSegment {

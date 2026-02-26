@@ -43,7 +43,7 @@ pub fn install_log_filter() {
     // after `ffmpeg::init()`.  They are called exactly once at startup before
     // any threads begin generating segments.
     unsafe {
-        ffmpeg_next::ffi::av_log_set_level(ffmpeg_next::ffi::AV_LOG_WARNING as i32);
+        ffmpeg_next::ffi::av_log_set_level(ffmpeg_next::ffi::AV_LOG_WARNING);
         ffmpeg_next::ffi::av_log_set_callback(Some(ffmpeg_log_callback));
     }
 }

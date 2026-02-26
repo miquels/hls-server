@@ -23,7 +23,6 @@
 //!    - Generate variant playlists (video/audio/subtitle) with `MediaInfo::generate_track_playlist`.
 //! 4. **Segments:** Generate actual media segments (fMP4 or WebVTT) handling specific sequence requests with `MediaInfo::generate_segment`.
 
-pub(crate) mod api;
 pub(crate) mod error;
 pub(crate) mod ffmpeg_utils;
 pub(crate) mod index;
@@ -37,8 +36,8 @@ pub mod url;
 #[cfg(test)]
 pub(crate) mod tests;
 
-pub use api::*;
 pub use error::{FfmpegError, HlsError, Result};
 pub use ffmpeg_utils::version_info as ffmpeg_version_info;
 pub use ffmpeg_utils::{init, install_log_filter};
+pub use types::*;
 pub use url::*;

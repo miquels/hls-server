@@ -6,7 +6,7 @@ use crate::ffmpeg_utils::ffmpeg;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicI64, AtomicU64};
 // use std::sync::Arc; // Commented out as per instruction
-// use crate::api::MediaInfo; // Commented out as per instruction
+// use MediaInfo; // Commented out as per instruction
 // use crate::ffmpeg_utils::ffmpeg::Rational; // Commented out as per instruction
 use crate::types::{
     AudioStreamInfo, SegmentInfo, StreamIndex, SubtitleFormat, SubtitleStreamInfo, VideoStreamInfo,
@@ -130,6 +130,7 @@ impl TestMediaInfo {
             last_accessed: AtomicU64::new(0),
             segment_first_pts: std::sync::Arc::new(Vec::new()),
             cached_context: None,
+            cache_enabled: true,
         };
 
         // Add video stream
@@ -220,77 +221,11 @@ impl TestMediaInfo {
         index
     }
 
-    /// Create a mock MediaInfo for testing
-    pub fn create_mock_media(&self) -> crate::api::MediaInfo {
+    pub fn create_mock_media(&self) -> crate::types::StreamIndex {
         let index = self.create_mock_index();
 
-        // Mock tracks
-        let mut tracks = Vec::new();
-        if self.has_video {
-            tracks.push(crate::api::TrackInfo {
-                id: "v".to_string(),
-                track_type: crate::api::TrackType::Video {
-                    width: 1920,
-                    height: 1080,
-                },
-                codec_id: "avc1".to_string(),
-                language: None,
-                transcode_to: None,
-                bitrate: Some(5_000_000),
-            });
-        }
-        // This part of the provided edit seems malformed and incomplete.
-        // I will try to reconstruct it based on the original logic and the provided snippets.
-        // The original logic iterated over index.video_streams, index.audio_streams, index.subtitle_streams.
-        // The provided edit seems to simplify video to a single hardcoded entry if has_video is true.
-        // For audio and subtitle, it seems to be trying to iterate but has syntax errors.
-
-        // Reconstructing based on the provided edit's intent and original structure:
-
-        // Video tracks (simplified as per the edit)
-        // This block was already handled above if self.has_video.
-        // The `language: v.language.clone(), bitrate: Some(v.bitrate), transcode_to: None, }); }`
-        // part seems to be a leftover from the original loop. I will remove it.
-
-        // Audio tracks
-        for a in &index.audio_streams {
-            tracks.push(crate::api::TrackInfo {
-                id: format!("a/{}", a.stream_index),
-                track_type: crate::api::TrackType::Audio {
-                    channels: a.channels,
-                    sample_rate: a.sample_rate,
-                },
-                codec_id: format!("{:?}", a.codec_id),
-                language: a.language.clone(),
-                bitrate: Some(a.bitrate),
-                transcode_to: None,
-            });
-        }
-
-        // Subtitle tracks
-        for s in &index.subtitle_streams {
-            tracks.push(crate::api::TrackInfo {
-                id: format!("s/{}", s.stream_index),
-                track_type: crate::api::TrackType::Subtitle {
-                    format: format!("{:?}", s.format), // Keeping original logic for format
-                },
-                codec_id: format!("{:?}", s.codec_id),
-                language: s.language.clone(),
-                bitrate: None,
-                transcode_to: None,
-            });
-        }
-
-        let media = crate::api::MediaInfo {
-            file_size: 1_000_000,
-            duration_secs: self.duration_secs,
-            video_timebase: crate::ffmpeg_utils::ffmpeg::Rational::new(1, 90000),
-            tracks,
-            index,
-            cache_enabled: true,
-        };
-        crate::api::register_test_stream(std::sync::Arc::new(media.clone()));
-        media
+        crate::types::register_test_stream(std::sync::Arc::new(index.clone()));
+        index
     }
 }
 

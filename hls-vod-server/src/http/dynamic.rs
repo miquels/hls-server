@@ -66,7 +66,7 @@ pub async fn handle_dynamic_request(
                 tracing::info!("Opening media: {:?} (stream_id: {:?})", media_path2, sid);
                 let result = tokio::task::spawn_blocking(move || {
                     let codecs_refs: Vec<&str> = codecs_clone.iter().map(|s| s.as_str()).collect();
-                    hls_vod_lib::MediaInfo::open(&media_path2, &codecs_refs, sid)
+                    hls_vod_lib::StreamIndex::open(&media_path2, &codecs_refs, sid)
                 })
                 .await
                 .map_err(|e| HttpError::InternalError(e.to_string()))?

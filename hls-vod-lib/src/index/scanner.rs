@@ -54,7 +54,7 @@ pub fn scan_file_with_options<P: AsRef<Path>>(
     index.duration_secs = context.duration() as f64 / ffmpeg::ffi::AV_TIME_BASE as f64;
 
     // Analyze each stream (reads only codec parameters from the container header)
-    for (i, stream) in context.streams().into_iter().enumerate() {
+    for (i, stream) in context.streams().enumerate() {
         let medium = stream.parameters().medium();
         match medium {
             ffmpeg::media::Type::Video => match analyze_video_stream(&stream, i) {
@@ -116,7 +116,6 @@ pub fn scan_file_with_options<P: AsRef<Path>>(
     let video_stream_idx = index.video_streams.first().unwrap().stream_index;
     let video_stream = context
         .streams()
-        .into_iter()
         .nth(video_stream_idx)
         .ok_or_else(|| FfmpegError::ReadFrame("Video stream not found".to_string()))?;
 
@@ -213,7 +212,7 @@ pub fn scan_file_with_options<P: AsRef<Path>>(
 
     // Build subtitle sample_index and non_empty_sequences from subtitle index entries
     for sub in &mut index.subtitle_streams {
-        let sub_stream = match context.streams().into_iter().nth(sub.stream_index) {
+        let sub_stream = match context.streams().nth(sub.stream_index) {
             Some(s) => s,
             None => continue,
         };

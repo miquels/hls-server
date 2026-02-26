@@ -197,17 +197,16 @@ pub(crate) fn generate_interleaved_init_segment(
                 muxer.add_video_stream(&params, idx)?;
                 has_video = true;
             }
-        } else if crate::ffmpeg_utils::utils::is_audio_codec(codec_id) {
-            if idx == audio_idx {
+        } else if crate::ffmpeg_utils::utils::is_audio_codec(codec_id)
+            && idx == audio_idx {
                 if needs_transcode {
                     // Use AAC encoder parameters instead of source
                     let audio_info = index
                         .audio_streams
                         .iter()
                         .find(|a| a.stream_index == audio_idx);
-                    let bitrate = get_recommended_bitrate(
-                        audio_info.map(|a| a.channels).unwrap_or(2),
-                    );
+                    let bitrate =
+                        get_recommended_bitrate(audio_info.map(|a| a.channels).unwrap_or(2));
                     let encoder = AacEncoder::open(HLS_SAMPLE_RATE, 2, bitrate)?;
                     muxer.add_audio_stream(&encoder.codec_parameters(), idx)?;
                 } else {
@@ -215,7 +214,6 @@ pub(crate) fn generate_interleaved_init_segment(
                 }
                 has_audio = true;
             }
-        }
     }
 
     // Check if we found the requested streams
@@ -232,8 +230,7 @@ pub(crate) fn generate_interleaved_init_segment(
     if let Some(video_info) = index.video_streams.first() {
         let fps = video_info.framerate;
         if fps.numerator() > 0 {
-            default_duration =
-                (90000 * fps.denominator() as u64 / fps.numerator() as u64) as u32;
+            default_duration = (90000 * fps.denominator() as u64 / fps.numerator() as u64) as u32;
         }
     }
 
@@ -384,7 +381,7 @@ pub(crate) fn generate_audio_segment(
         .audio_streams
         .iter()
         .find(|a| a.stream_index == track_index)
-        .map(|a| needs_transcoding(a))
+        .map(needs_transcoding)
         .unwrap_or(false);
 
     if force_aac || needs_transcode {
@@ -827,9 +824,8 @@ fn generate_media_segment_ffmpeg(
                             .audio_streams
                             .iter()
                             .find(|a| a.stream_index == audio_idx);
-                        let bitrate = get_recommended_bitrate(
-                            audio_info.map(|a| a.channels).unwrap_or(2),
-                        );
+                        let bitrate =
+                            get_recommended_bitrate(audio_info.map(|a| a.channels).unwrap_or(2));
                         let encoder = AacEncoder::open(HLS_SAMPLE_RATE, 2, bitrate)?;
                         muxer.add_audio_stream(&encoder.codec_parameters(), idx)?;
                     } else {
@@ -993,7 +989,7 @@ fn generate_media_segment_ffmpeg(
 
         // For interleaved mode, use video stream for segment boundary detection
         let is_video_stream = crate::ffmpeg_utils::utils::is_video_codec(stream.parameters().id());
-        
+
         // Video-specific segment boundary logic.
         //
         // Segment boundaries are defined by keyframe DTS values. For video:
@@ -1163,15 +1159,17 @@ fn generate_media_segment_ffmpeg(
         } else {
             stream_indices[0]
         };
-        let output_timebase = muxer.get_output_timebase(stream_idx_for_tb).unwrap_or_else(|| {
-            if segment_type == "video" || is_interleaved {
-                ffmpeg::Rational(1, 90000)
-            } else {
-                // Fallback for audio if unknown? detailed in scanner?
-                // Best guess: 1/sample_rate, but let's default to video_timebase if fails
-                video_timebase
-            }
-        });
+        let output_timebase = muxer
+            .get_output_timebase(stream_idx_for_tb)
+            .unwrap_or_else(|| {
+                if segment_type == "video" || is_interleaved {
+                    ffmpeg::Rational(1, 90000)
+                } else {
+                    // Fallback for audio if unknown? detailed in scanner?
+                    // Best guess: 1/sample_rate, but let's default to video_timebase if fails
+                    video_timebase
+                }
+            });
 
         tracing::debug!(
             "Patching tfdt with timebase: {}/{}",
@@ -1416,6 +1414,7 @@ mod tests {
             last_accessed: std::sync::atomic::AtomicU64::new(0),
             segment_first_pts: std::sync::Arc::new(Vec::new()),
             cached_context: None,
+            cache_enabled: true,
         };
 
         let init_segment =

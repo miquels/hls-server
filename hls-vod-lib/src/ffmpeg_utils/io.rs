@@ -143,7 +143,7 @@ pub fn create_memory_io(
         // Create AVIO context
         let avio_ctx = ffmpeg::ffi::avio_alloc_context(
             buffer,
-            buffer_size as i32, // Cast to i32 as required by avio_alloc_context
+            buffer_size, // Cast to i32 as required by avio_alloc_context
             1,
             writer_ptr as *mut c_void,
             None,

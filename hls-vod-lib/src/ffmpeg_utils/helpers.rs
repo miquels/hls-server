@@ -157,7 +157,7 @@ pub fn fltp_plane_as_f32(byte_slice: &[u8], sample_count: usize) -> Option<&[f32
         return None;
     }
     let ptr = byte_slice.as_ptr();
-    if ptr as usize % std::mem::align_of::<f32>() != 0 {
+    if !(ptr as usize).is_multiple_of(std::mem::align_of::<f32>()) {
         return None;
     }
     // SAFETY: alignment and length are verified above.  FLTP planes are
@@ -174,7 +174,7 @@ pub fn fltp_plane_as_f32_mut(byte_slice: &mut [u8], sample_count: usize) -> Opti
         return None;
     }
     let ptr = byte_slice.as_mut_ptr();
-    if ptr as usize % std::mem::align_of::<f32>() != 0 {
+    if !(ptr as usize).is_multiple_of(std::mem::align_of::<f32>()) {
         return None;
     }
     Some(unsafe { std::slice::from_raw_parts_mut(ptr as *mut f32, sample_count) })

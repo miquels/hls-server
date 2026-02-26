@@ -111,7 +111,7 @@ impl AudioDecoder {
 
     /// Channel count of decoded frames.
     pub fn channels(&self) -> u16 {
-        self.decoder.channels() as u16
+        self.decoder.channels()
     }
 
     /// Sample format of decoded frames.
