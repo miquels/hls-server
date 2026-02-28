@@ -315,6 +315,26 @@ fn patch_tfdts(media_data: &mut Vec<u8>, target_time: u64, start_frag_seq: u32) 
     );
 }
 
+/// Patch only `mfhd.FragmentSequenceNumber` — leave `tfdt` untouched.
+///
+/// Used for interleaved (multi-track) segments where tfdt values are already
+/// correct per-track, but fragment sequence numbers must increase across segments.
+fn patch_mfhd(media_data: &mut Vec<u8>, start_frag_seq: u32) {
+    let mut frag_count = 0u32;
+
+    crate::segment::isobmff::walk_boxes_mut(
+        media_data,
+        &[b"moof", b"traf"],
+        &mut |btype, payload| {
+            if btype == b"mfhd" && payload.len() >= 8 {
+                let seq = start_frag_seq.wrapping_add(frag_count);
+                frag_count += 1;
+                payload[4..8].copy_from_slice(&seq.to_be_bytes());
+            }
+        },
+    );
+}
+
 /// Generate a video segment
 pub(crate) fn generate_video_segment(
     index: &StreamIndex,
@@ -774,14 +794,17 @@ fn generate_media_segment_ffmpeg(
         )));
     }
 
-    // Write header WITHOUT delay_moov for video and interleaved segments.
+    // Write header WITHOUT delay_moov for video segments.
     // delay_moov causes FFmpeg to emit a pre-roll moof[0] containing B-frames with
     // large composition-time offsets. Those frames display within the segment but
-    // for mid-stream seeks their PTS values fall BEFORE segment start — causing
-    // the player to jump backward then forward when seeking.
-    // Without delay_moov, the first moof starts at the keyframe DTS directly.
-    // Audio-only segments still need delay_moov to correctly handle encoder pre-roll.
-    let _init_bytes = muxer.write_header(segment_type == "audio")?;
+    // their presence makes the first *displayable* PTS of the segment appear hundreds
+    // of milliseconds after the last displayable PTS of the previous segment —
+    // producing a visible freeze/jump at every segment boundary.
+    // Without delay_moov, the first moof starts at the keyframe DTS directly,
+    // giving smooth PTS continuity across segment boundaries.
+    // For interleaved (av) mode, delay_moov=true is needed for the muxer to correctly
+    // interleave audio and video packets; the seek issues are handled separately.
+    let _init_bytes = muxer.write_header(segment_type != "video")?;
 
     // Encoder delay: the number of samples (in output timebase) that the codec
     // prepends as pre-roll before the first presented sample.  FFmpeg signals this
@@ -1136,9 +1159,17 @@ fn generate_media_segment_ffmpeg(
             );
         }
     } else {
+        // For interleaved segments: patch only mfhd (fragment sequence numbers) to
+        // ensure they increase monotonically across segments — required by CMAF/HLS.
+        // Do NOT patch tfdt: each track's tfdt is already correct from FFmpeg's own
+        // per-track timebase rescaling, and applying a single delta to both tracks
+        // would corrupt whichever track we didn't compute the delta from.
+        let start_frag_seq = (segment.sequence as u32).wrapping_mul(1000).wrapping_add(1);
+        patch_mfhd(&mut media_data, start_frag_seq);
         tracing::debug!(
-            "[sync] av seg={} skipping patch_tfdts (interleaved: per-track timestamps are correct)",
-            segment.sequence
+            "[sync] av seg={} patched mfhd only (start_frag_seq={})",
+            segment.sequence,
+            start_frag_seq
         );
     }
 
