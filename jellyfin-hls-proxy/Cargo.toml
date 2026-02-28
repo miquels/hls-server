@@ -1,0 +1,57 @@
+[package]
+name = "jellyfin-hls-proxy"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "HLS transmuxing proxy for Jellyfin media server"
+license = "MIT"
+
+# Override workspace detection - this allows building independently
+# When part of the workspace, comment out this table
+[workspace]
+
+[dependencies]
+# HTTP server framework
+axum = { version = "0.8", features = ["macros", "ws"] }
+axum-server = "0.8"
+tokio = { version = "1.49", features = ["full"] }
+
+# CLI parsing
+clap = { version = "4.5", features = ["derive"] }
+
+# Workspace dependencies (path reference - requires workspace root to include this crate)
+# Uncomment the line below once the workspace is properly configured
+# hls-vod-lib = { path = "../hls-vod-lib" }
+
+# HTTP proxying
+hyper = { version = "1.0", features = ["full"] }
+hyper-util = { version = "0.1", features = ["full"] }
+http = "1.0"
+http-body-util = "0.1"
+http-body = "1.0"
+tower = { version = "0.5", features = ["full"] }
+tower-http = { version = "0.6", features = ["full"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Error handling
+thiserror = "2.0"
+
+# Utilities
+bytes = "1.0"
+mime = "0.3"
+percent-encoding = "2.3"
+urlencoding = "2.1"
+
+# WebSocket support
+futures-util = "0.3"
+tokio-tungstenite = "0.26"
+
+[dev-dependencies]
+tokio-test = "0.4"

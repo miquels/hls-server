@@ -15,16 +15,50 @@ pub async fn handle_dynamic_request(
     >,
 ) -> Result<axum::response::Response, HttpError> {
     // Decode the URL.
+    tracing::info!("Raw URL path: {}", path);
     let hls_url = hls_vod_lib::HlsParams::parse(&path).ok_or_else(|| {
         HttpError::SegmentNotFound(format!(
             "Invalid path format or unsupported HLS request: {}",
             path
         ))
     })?;
+    tracing::info!("Parsed HLS URL: {:?}", hls_url);
+    tracing::info!("Parsed video_url: {}", hls_url.video_url);
 
     // We simply take the url path as the path to the video.
-    let media_path_str = format!("/{}", &hls_url.video_url);
-    let media_path = std::path::PathBuf::from(&media_path_str);
+    let mut media_path = std::path::PathBuf::from(&hls_url.video_url);
+    tracing::info!(
+        "Initial check existence ({}): {}",
+        hls_url.video_url,
+        media_path.exists()
+    );
+
+    if !media_path.exists() {
+        if !hls_url.video_url.starts_with('/') {
+            let prefixed = format!("/{}", hls_url.video_url);
+            media_path = std::path::PathBuf::from(&prefixed);
+            tracing::info!(
+                "Prefixed check existence ({}): {}",
+                prefixed,
+                media_path.exists()
+            );
+        }
+    }
+
+    if !media_path.exists() && !media_path.is_absolute() {
+        if let Ok(cwd) = std::env::current_dir() {
+            let joined = cwd.join(&hls_url.video_url);
+            tracing::info!(
+                "CWD joined check ({}): {}",
+                joined.display(),
+                joined.exists()
+            );
+            if joined.exists() {
+                media_path = joined;
+            }
+        }
+    }
+    tracing::info!("FINAL Resolved media path: {:?}", media_path);
 
     // All code is sync, so spawn it in a separate thread.
     tokio::task::spawn_blocking(move || {

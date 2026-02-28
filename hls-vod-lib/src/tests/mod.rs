@@ -11,6 +11,9 @@
 pub mod dts_debug;
 pub mod e2e;
 pub mod fixtures;
+pub mod init_inspect;
+pub mod playlist_dump;
+pub mod pts_debug;
 pub mod test_audio_bug;
 pub mod test_context_reuse;
 pub mod test_send;

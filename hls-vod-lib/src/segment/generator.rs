@@ -803,6 +803,8 @@ fn generate_media_segment_ffmpeg(
                     stream_indices.push(idx);
                 }
             }
+            // Patch it
+            let _start_pts_rescaled = segment.start_pts;
             if let Some(audio_idx) = audio_track_index {
                 if idx == audio_idx && crate::ffmpeg_utils::utils::is_audio_codec(codec_id) {
                     let audio_info = index.get_audio_stream(audio_idx)?;
@@ -920,11 +922,9 @@ fn generate_media_segment_ffmpeg(
         seek_ts
     );
 
-    if seek_ts > 0 {
-        input
-            .seek(seek_ts, ..seek_ts)
-            .map_err(|e| HlsError::Ffmpeg(crate::error::FfmpegError::ReadFrame(e.to_string())))?;
-    }
+    input
+        .seek(seek_ts, ..seek_ts)
+        .map_err(|e| HlsError::Ffmpeg(crate::error::FfmpegError::ReadFrame(e.to_string())))?;
 
     // Iterate packets
     let mut _packet_count = 0;
@@ -973,14 +973,6 @@ fn generate_media_segment_ffmpeg(
             ffmpeg::Rational(1, 90000),
         );
 
-        tracing::trace!(
-            "Read packet: pts_90k={}, dts_90k={}, start_pts_90k={}, end_pts_90k={}",
-            pts_90k,
-            dts_90k,
-            start_pts_90k,
-            end_pts_90k
-        );
-
         // For interleaved mode, use video stream for segment boundary detection
         let is_video_stream = crate::ffmpeg_utils::utils::is_video_codec(stream.parameters().id());
 
@@ -1016,7 +1008,11 @@ fn generate_media_segment_ffmpeg(
             // For interleaved mode, audio packets within video boundaries are included
             if !is_interleaved {
                 if pts_90k >= end_pts_90k {
-                    break;
+                    if _packet_count > 0 {
+                        break;
+                    } else {
+                        continue;
+                    }
                 }
                 if pts_90k < start_pts_90k {
                     continue;
@@ -1117,7 +1113,6 @@ fn generate_media_segment_ffmpeg(
     let full_data = muxer.finalize()?;
 
     // Use robust offset detection to find start of media segment
-    // This handles cases where init segment size might change due to seeking/writing
     let media_offset = find_media_segment_offset(&full_data).ok_or_else(|| {
         HlsError::Muxing("No media segment data found (moof/styp missing)".to_string())
     })?;
@@ -1125,201 +1120,81 @@ fn generate_media_segment_ffmpeg(
     // We want only the media segment (moof + mdat)
     let mut media_data = full_data[media_offset..].to_vec();
 
-    // Patch tfdt.baseMediaDecodeTime with the segment's declared start time,
-    // not with first_packet_dts.
-    //
-    // Using `first_packet_dts` was intended to match the trun base-DTS exactly,
-    // but it has two problems:
-    //
-    //  1. For H.264/HEVC with B-frames, the DTS of the first packet in a segment
-    //     is always earlier than the segment's PTS boundary by (B_depth × frame_dur).
-    //     e.g. for 2-B-frame 30fps video at 90kHz: first_dts = start_pts - 2×3000 = -6000
-    //     at segment 0 (wraps to ~2^64 as u64) or = 354000 at segment 1 rather than 360000.
-    //
-    //  2. Validators (including mediastreamvalidator) measure segment duration and
-    //     continuity from consecutive tfdt values, so the tfdt MUST reflect the
-    //     segment's intended timeline position, not the B-frame-shifted DTS.
-    //
-    // Anchoring to `segment.start_pts` (rescaled from the source video timebase to
-    // 90 kHz) guarantees:
-    //   • tfdt is always ≥ 0  (no negative-wraparound to 2^64)
-    //   • tfdt values are strictly increasing across segments
-    //   • tfdt matches the #EXT-X-PROGRAM-DATE-TIME / playlist timing
-    // For audio: look up the first displayable video frame PTS (in 90kHz) from the
-    // shared cache. Written by the video generator after patching via read_first_display_pts.
-    let first_video_pts_90k: Option<i64> = if segment_type == "audio" {
-        index.get_segment_first_pts(segment.sequence)
-    } else {
-        None
-    };
-
     // Start fragment sequence for this segment.
     let start_frag_seq = (segment.sequence as u32).wrapping_mul(1000).wrapping_add(1);
 
-    // Normalize timeline to 0-based by subtracting the PTS of the very first segment.
-    // This fixed the 1-2 second start delay in Safari when the source file has a start_time offset.
-    let global_offset_pts = index.segments[0].start_pts;
+    // Normalize timeline to 0-based by anchoring to segment.start_pts (which is already 0-based in index).
+    // This ensures EXTINF durations match the tfdt timeline perfectly across all track types.
+    let video_tb = index.video_timebase;
+    let out_tb_90k = ffmpeg::Rational::new(1, 90000);
 
-    if !is_interleaved {
-        if let Some(base_dts) = first_packet_dts {
-            let stream_idx_for_tb = stream_indices[0];
-            let output_timebase =
-                muxer
-                    .get_output_timebase(stream_idx_for_tb)
-                    .unwrap_or_else(|| {
-                        if segment_type == "video" {
-                            ffmpeg::Rational(1, 90000)
-                        } else {
-                            video_timebase
-                        }
-                    });
+    let video_target_tfdt =
+        crate::ffmpeg_utils::utils::rescale_ts(segment.start_pts, video_tb, out_tb_90k) as u64;
 
-            tracing::debug!(
-                "Patching tfdt with timebase: {}/{}",
-                output_timebase.numerator(),
-                output_timebase.denominator()
-            );
+    if is_interleaved {
+        let v_idx = video_track_index.unwrap_or(stream_indices[0]);
+        let a_idx = audio_track_index.unwrap_or(stream_indices.last().copied().unwrap_or(0));
+        let v_track_id = muxer.get_output_track_id(v_idx).unwrap_or(1);
+        let a_track_id = muxer.get_output_track_id(a_idx).unwrap_or(2);
 
-            let start_pts_rescaled = crate::ffmpeg_utils::utils::rescale_ts(
-                segment.start_pts,
-                video_timebase,
-                output_timebase,
-            );
-            let global_offset_target = crate::ffmpeg_utils::utils::rescale_ts(
-                global_offset_pts,
-                video_timebase,
-                output_timebase,
-            );
-            let target_time = if segment_type == "video" {
-                (base_dts - global_offset_target).max(0) as u64
-            } else {
-                let anchor = match first_video_pts_90k {
-                    Some(pts_90k) => {
-                        let global_offset_90k = crate::ffmpeg_utils::utils::rescale_ts(
-                            global_offset_pts,
-                            video_timebase,
-                            ffmpeg::Rational(1, 90000),
-                        );
-                        let rescaled = crate::ffmpeg_utils::utils::rescale_ts(
-                            pts_90k - global_offset_90k,
-                            ffmpeg::Rational(1, 90000),
-                            output_timebase,
-                        );
-                        tracing::debug!(
-                            "[sync] audio seg={} using cached (normalized) video pts_90k={} delta={} -> {}",
-                            segment.sequence,
-                            pts_90k,
-                            pts_90k - global_offset_90k,
-                            rescaled
-                        );
-                        rescaled
-                    }
-                    None => {
-                        tracing::debug!(
-                            "[sync] audio seg={} no cached video pts, using start_pts fallback",
-                            segment.sequence
-                        );
-                        crate::ffmpeg_utils::utils::rescale_ts(
-                            segment.start_pts - global_offset_pts,
-                            video_timebase,
-                            output_timebase,
-                        )
-                    }
-                };
-                (anchor + encoder_delay).max(0) as u64
-            };
+        let audio_info = index.get_audio_stream(a_idx)?;
+        let audio_tb = ffmpeg::Rational::new(1, audio_info.sample_rate as i32);
 
-            tracing::debug!(
-                "[sync] {} seg={} tfdt target_time={} out_tb={}/{} (base_dts={} start_pts_rescaled={} encoder_delay={})",
-                segment_type, segment.sequence, target_time,
-                output_timebase.numerator(), output_timebase.denominator(),
-                base_dts,
-                start_pts_rescaled,
-                encoder_delay
-            );
-
-            patch_tfdts(&mut media_data, target_time, start_frag_seq);
-        } else {
-            tracing::warn!(
-                "[tfdt] No packets written for segment {} ({}), tfdt will be 0",
-                segment.sequence,
-                segment_type
-            );
-        }
-    } else {
-        // For interleaved segments: patch mfhd AND each track's tfdt independently.
-        // delay_moov=true causes FFmpeg to shift all timestamps to start near 0;
-        // we restore correct per-track target times here.
-
-        let video_idx = video_track_index.unwrap_or(stream_indices[0]);
-        let audio_idx = audio_track_index.unwrap_or(stream_indices.last().copied().unwrap_or(0));
-
-        let video_track_id = muxer.get_output_track_id(video_idx).unwrap_or(1);
-        let audio_track_id = muxer.get_output_track_id(audio_idx).unwrap_or(2);
-
-        // Video target: use first video packet DTS (corrects B-frame DTS offset from keyframe).
-        let video_output_tb = muxer
-            .get_output_timebase(video_idx)
-            .unwrap_or(ffmpeg::Rational(1, 90000));
-        let video_target = (first_video_dts.or(first_packet_dts).unwrap_or(0) as i64
-            - global_offset_pts)
-            .max(0) as u64;
-
-        // Audio target: use first audio packet DTS (corrects delay_moov zero-shift identically).
-        // If we don't have it, fallback to start_pts.
-        let audio_output_tb = muxer
-            .get_output_timebase(audio_idx)
-            .unwrap_or(ffmpeg::Rational(1, 48000));
-        let audio_target = if let Some(a_dts) = first_audio_dts {
-            let global_offset_audio = crate::ffmpeg_utils::utils::rescale_ts(
-                global_offset_pts,
-                video_timebase,
-                audio_output_tb,
-            );
-            (a_dts as i64 - global_offset_audio).max(0) as u64
-        } else {
-            let audio_start = crate::ffmpeg_utils::utils::rescale_ts(
-                segment.start_pts - global_offset_pts,
-                video_timebase,
-                audio_output_tb,
-            );
-            (audio_start + encoder_delay).max(0) as u64
+        let audio_target_tfdt = match index.get_segment_first_pts(segment.sequence) {
+            Some(pts_90k) => {
+                // Video already generated and cached the first display PTS.
+                // Sync audio to it exactly.
+                crate::ffmpeg_utils::utils::rescale_ts(pts_90k, out_tb_90k, audio_tb) as u64
+            }
+            None => {
+                // Fallback: use segment.start_pts
+                crate::ffmpeg_utils::utils::rescale_ts(segment.start_pts, video_tb, audio_tb) as u64
+            }
         };
 
-        tracing::debug!(
-            "[sync] av seg={} per-track patch: v_track_id={} v_target={} ({:.3}s @{}/{}) a_track_id={} a_target={} ({:.3}s @{}/{})",
+        tracing::info!(
+            "[sync] interleaved seq={} v_tfdt={} a_tfdt={}",
             segment.sequence,
-            video_track_id, video_target,
-            video_target as f64 / video_output_tb.denominator() as f64,
-            video_output_tb.numerator(), video_output_tb.denominator(),
-            audio_track_id, audio_target,
-            audio_target as f64 / audio_output_tb.denominator() as f64,
-            audio_output_tb.numerator(), audio_output_tb.denominator(),
+            video_target_tfdt,
+            audio_target_tfdt
         );
 
         patch_tfdts_per_track(
             &mut media_data,
             start_frag_seq,
-            video_track_id,
-            audio_track_id,
-            video_target,
-            audio_target,
+            v_track_id,
+            a_track_id,
+            video_target_tfdt,
+            audio_target_tfdt,
         );
-    }
+    } else if segment_type == "video" {
+        patch_tfdts(&mut media_data, video_target_tfdt, start_frag_seq);
 
-    // For video (non-interleaved only): store first displayable PTS so the separate
-    // audio track can align its tfdt correctly.  In interleaved mode the audio tfdt
-    // is already correct from FFmpeg's timebase rescaling.
-    if segment_type == "video" {
-        if let Some(first_display_pts_90k) = read_first_display_pts(&media_data) {
-            index.set_segment_first_pts(segment.sequence, first_display_pts_90k);
-            tracing::debug!(
-                "[sync] video seg={} cached first_display_pts_90k={} ({:.6}s)",
-                segment.sequence,
-                first_display_pts_90k,
-                first_display_pts_90k as f64 / 90000.0
-            );
+        // Success: cache the first display PTS for the audio track (if non-interleaved)
+        if let Some(pts_90k) = read_first_display_pts(&media_data) {
+            index.set_segment_first_pts(segment.sequence, pts_90k);
         }
+    } else if segment_type == "audio" {
+        let a_idx = audio_track_index.unwrap_or(stream_indices[0]);
+        let audio_info = index.get_audio_stream(a_idx)?;
+        let audio_tb = ffmpeg::Rational::new(1, audio_info.sample_rate as i32);
+
+        let audio_target_tfdt = match index.get_segment_first_pts(segment.sequence) {
+            Some(pts_90k) => {
+                crate::ffmpeg_utils::utils::rescale_ts(pts_90k, out_tb_90k, audio_tb) as u64
+            }
+            None => {
+                crate::ffmpeg_utils::utils::rescale_ts(segment.start_pts, video_tb, audio_tb) as u64
+            }
+        };
+
+        tracing::info!(
+            "[sync] audio seq={} tfdt={}",
+            segment.sequence,
+            audio_target_tfdt
+        );
+
+        patch_tfdts(&mut media_data, audio_target_tfdt, start_frag_seq);
     }
 
     // Prepend 'styp' box (Required for HLS fMP4)
@@ -1413,7 +1288,8 @@ mod tests {
             video_byte_offset: 0,
         };
         index.segments.push(segment.clone());
-        index.segments.push(segment.clone()); // Simplest way to have sequence 1 at index 1
+        // Simplest way to have sequence 1 at index 1
+        index.segments.push(segment);
 
         let result = generate_video_segment(&index, 0, 1, &path);
 
