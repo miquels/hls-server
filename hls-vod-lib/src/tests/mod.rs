@@ -9,9 +9,10 @@
 //! - Performance benchmarks
 
 pub mod dts_debug;
+pub mod dts_debug2;
+pub mod e2e;
 pub mod fixtures;
 pub mod test_context_reuse;
 pub mod test_send;
 pub mod validation;
 pub mod validator_debug;
-pub mod e2e;

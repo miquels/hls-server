@@ -876,7 +876,7 @@ fn generate_media_segment_ffmpeg(
     // giving smooth PTS continuity across segment boundaries.
     // For interleaved (av) mode, delay_moov=true is needed for the muxer to correctly
     // interleave audio and video packets; the seek issues are handled separately.
-    let _init_bytes = muxer.write_header(segment_type != "video")?;
+    let _init_bytes = muxer.write_header(false)?;
 
     // Encoder delay: the number of samples (in output timebase) that the codec
     // prepends as pre-roll before the first presented sample.  FFmpeg signals this
