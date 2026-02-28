@@ -166,8 +166,7 @@ impl TestMediaInfo {
                 channels: 2,
                 bitrate: 128000,
                 language,
-                is_transcoded: false,
-                source_stream_index: None,
+                transcode_to: None,
                 encoder_delay: 0,
             });
             audio_index += 1;

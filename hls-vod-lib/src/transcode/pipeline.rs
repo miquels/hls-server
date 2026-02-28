@@ -373,8 +373,7 @@ mod tests {
             channels: 2,
             bitrate: 128000,
             language: Some("en".to_string()),
-            is_transcoded: false,
-            source_stream_index: None,
+            transcode_to: None,
             encoder_delay: 0,
         }
     }
@@ -409,8 +408,7 @@ mod tests {
             channels: 6,
             bitrate: 384000,
             language: Some("en".to_string()),
-            is_transcoded: false,
-            source_stream_index: None,
+            transcode_to: None,
             encoder_delay: 0,
         };
         let reqs = get_transcode_requirements(&stream);

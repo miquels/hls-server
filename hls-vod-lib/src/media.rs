@@ -2,7 +2,7 @@
 //!
 //! Call `StreamIndex::open()` to get information about a media file.
 //!
-//! ```
+//! ```ignore
 //! let info = StreamIndex::open("file.mp4").expect("open file");
 //! println!("file has {} video and {} audio tracks",
 //!     info.video_streams.len(), info.audio_streams.len());
@@ -18,7 +18,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use ffmpeg_next as ffmpeg;
 use uuid::Uuid;
 
-use crate::cache::{STREAMS_BY_ID, get_stream_by_id};
+use crate::cache::{get_stream_by_id, STREAMS_BY_ID};
 use crate::error::{HlsError, Result};
 
 /// `ffmpeg_next::codec::Id`
@@ -194,7 +194,7 @@ pub struct StreamIndex {
     /// List of subtitle streams present in the media
     pub subtitle_streams: Vec<SubtitleStreamInfo>,
     /// Pre-calculated timeline boundaries breaking the content into HLS segments
-    pub (crate) segments: Vec<SegmentInfo>,
+    pub(crate) segments: Vec<SegmentInfo>,
     /// Instant when the index was created
     pub(crate) indexed_at: SystemTime,
     /// Last access timestamp mapped to Unix EPOCH for cache eviction checking
@@ -302,7 +302,11 @@ impl StreamIndex {
         })
     }
 
-    pub(crate) fn get_segment(&self, segment_type: &str, sequence: usize) -> Result<&'_ SegmentInfo> {
+    pub(crate) fn get_segment(
+        &self,
+        segment_type: &str,
+        sequence: usize,
+    ) -> Result<&'_ SegmentInfo> {
         // TODO: segments should be a HashMap<u64, Segment> ?
         self.segments
             .iter()
@@ -341,10 +345,7 @@ impl StreamIndex {
         crate::index::scanner::scan_file_with_options(path, &options)
     }
 
-    pub(crate) fn open(
-        path: &Path,
-        stream_id: Option<String>,
-    ) -> Result<Arc<StreamIndex>> {
+    pub(crate) fn open(path: &Path, stream_id: Option<String>) -> Result<Arc<StreamIndex>> {
         if let Some(id) = &stream_id {
             if let Some(media) = get_stream_by_id(id) {
                 media.touch();
@@ -400,8 +401,7 @@ impl StreamIndex {
     }
 
     pub(crate) fn get_audio_stream(&self, stream_index: usize) -> Result<&'_ AudioStreamInfo> {
-        self
-            .audio_streams
+        self.audio_streams
             .iter()
             .find(|s| s.stream_index == stream_index)
             .ok_or_else(|| {
@@ -409,13 +409,17 @@ impl StreamIndex {
             })
     }
 
-    pub(crate) fn get_audio_stream_mut(&mut self, stream_index: usize) -> Option<&'_ mut AudioStreamInfo> {
-        self.audio_streams.iter_mut().find(|s| s.stream_index == stream_index)
+    pub(crate) fn get_audio_stream_mut(
+        &mut self,
+        stream_index: usize,
+    ) -> Option<&'_ mut AudioStreamInfo> {
+        self.audio_streams
+            .iter_mut()
+            .find(|s| s.stream_index == stream_index)
     }
 
     pub(crate) fn get_subtitle_stream(&self, track_index: usize) -> Result<&'_ SubtitleStreamInfo> {
-        self
-            .subtitle_streams
+        self.subtitle_streams
             .iter()
             .find(|s| s.stream_index == track_index)
             .ok_or_else(|| {

@@ -214,8 +214,7 @@ mod tests {
             return;
         }
 
-        let media =
-            crate::media::StreamIndex::open(&asset_path, &[] as &[&str], None).expect("Parsing failed");
+        let media = crate::media::StreamIndex::open(&asset_path, None).expect("Parsing failed");
         let stream_id = media.stream_id.clone();
         let index = &media;
 
@@ -268,18 +267,17 @@ mod tests {
             return;
         }
 
-        let media =
-            crate::media::StreamIndex::open(&asset_path, &[] as &[&str], None).expect("Parsing failed");
+        let media = crate::media::StreamIndex::open(&asset_path, None).expect("Parsing failed");
         let stream_id = media.stream_id.clone();
         let index = &media;
         let audio_stream = index.audio_streams.first().expect("No audio stream found");
 
-        let seg0_bytes = generate_audio_segment(index, 1, 0, &asset_path, false)
+        let seg0_bytes = generate_audio_segment(index, 1, 0, &asset_path)
             .expect("Failed to generate audio seg 0");
         let seg0 = parse_media_segment(&seg0_bytes);
         assert_eq!(seg0.base_decode_time, 0);
 
-        let seg1_bytes = generate_audio_segment(index, 1, 1, &asset_path, false)
+        let seg1_bytes = generate_audio_segment(index, 1, 1, &asset_path)
             .expect("Failed to generate audio seg 1");
         let seg1 = parse_media_segment(&seg1_bytes);
 

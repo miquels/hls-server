@@ -2,8 +2,8 @@
 //!
 //! Generates HLS variant playlists for video, audio, and subtitles.
 
-use crate::media::StreamIndex;
 use super::codec::*;
+use crate::media::StreamIndex;
 
 /// Generate video variant playlist
 ///
@@ -53,10 +53,7 @@ pub(crate) fn generate_video_playlist(index: &StreamIndex) -> String {
 /// Generate audio variant playlist
 ///
 /// Creates a/<track_index>.m3u8 with segment references
-pub(crate) fn generate_audio_playlist(
-    index: &StreamIndex,
-    track_index: usize,
-) -> String {
+pub(crate) fn generate_audio_playlist(index: &StreamIndex, track_index: usize) -> String {
     let mut output = String::new();
 
     // Calculate target duration
@@ -321,8 +318,7 @@ mod tests {
             channels: 2,
             bitrate: 128000,
             language: Some("en".to_string()),
-            is_transcoded: false,
-            source_stream_index: None,
+            transcode_to: None,
             encoder_delay: 0,
         });
 
@@ -363,7 +359,7 @@ mod tests {
     #[test]
     fn test_generate_audio_playlist() {
         let index = create_test_index();
-        let playlist = generate_audio_playlist(&index, 1, false);
+        let playlist = generate_audio_playlist(&index, 1);
 
         assert!(playlist.contains("#EXTM3U"));
         assert!(playlist.contains("#EXT-X-VERSION:7"));

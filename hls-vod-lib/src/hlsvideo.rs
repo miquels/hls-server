@@ -21,12 +21,14 @@ use crate::params::{HlsParams, UrlType};
 ///
 /// You would use this like:
 ///
-/// ```
+/// ```ignore
+/// # use hls_vod_lib::{HlsVideo, HlsParams};
+/// # let (video_path, hls_params) = unimplemented!();
 /// let mut video = HlsVideo::open(video_path, hls_params)?;
-/// if let HslVideo::MainPlaylist(p) = &mut video {
-///     p.filter_codecs(["aac"]);
+/// if let HlsVideo::MainPlaylist(p) = &mut video {
+///     p.filter_codecs(&["aac"]);
 /// }
-/// video.generate()
+/// # Ok::<Vec<u8>, Box<dyn std::error::Error>>(video.generate()?)
 /// ```
 ///
 pub enum HlsVideo {
@@ -40,10 +42,7 @@ impl HlsVideo {
         let index = StreamIndex::open(video, None)?;
         Ok(match &hls_params.url_type {
             UrlType::MainPlaylist => HlsVideo::MainPlaylist(MainPlaylist::new(hls_params, index)),
-            _ => HlsVideo::PlaylistOrSegment(PlaylistOrSegment {
-                hls_params,
-                index,
-            }),
+            _ => HlsVideo::PlaylistOrSegment(PlaylistOrSegment { hls_params, index }),
         })
     }
 
@@ -74,11 +73,11 @@ impl HlsVideo {
 /// Here you can enable/disable tracks, filter on codecs, set audio/video
 /// interleaving just before generating the main playlist.
 pub struct MainPlaylist {
-    pub hls_params:    HlsParams,
-    pub index:      Arc<StreamIndex>,
-    pub tracks:     HashSet<usize>,
-    pub codecs:     Vec<String>,
-    pub transcode:  HashMap<usize, String>,
+    pub hls_params: HlsParams,
+    pub index: Arc<StreamIndex>,
+    pub tracks: HashSet<usize>,
+    pub codecs: Vec<String>,
+    pub transcode: HashMap<usize, String>,
     pub interleave: bool,
 }
 
@@ -86,8 +85,17 @@ pub struct MainPlaylist {
 ///
 /// This just generates the playlist or segment from the URL.
 pub struct PlaylistOrSegment {
-    hls_params:    HlsParams,
-    index:      Arc<StreamIndex>,
+    hls_params: HlsParams,
+    index: Arc<StreamIndex>,
+}
+
+impl PlaylistOrSegment {
+    /// Construct directly from an already-opened stream index.
+    /// Used in tests where we have an in-memory fixture without a real file path.
+    #[cfg(test)]
+    pub fn from_index(hls_params: HlsParams, index: Arc<StreamIndex>) -> Self {
+        Self { hls_params, index }
+    }
 }
 
 impl MainPlaylist {
@@ -130,7 +138,7 @@ impl MainPlaylist {
                     self.interleave,
                 );
                 Ok(playlist.into_bytes())
-            },
+            }
             _ => panic!("impossible condition"),
         }
     }
@@ -155,7 +163,6 @@ impl PlaylistOrSegment {
     /// Generate the playlist or segment.
     // TODO: returns Bytes instead of Vec<u8>
     pub fn generate(&self) -> crate::error::Result<Vec<u8>> {
-
         // See if it's in the cache.
         let segment_key = self.hls_params.to_string();
         if let Some(c) = crate::cache::segment_cache() {
@@ -182,10 +189,7 @@ impl PlaylistOrSegment {
                     .any(|a| a.stream_index == p.track_id)
                 {
                     // Audio only playlist
-                    crate::playlist::variant::generate_audio_playlist(
-                        &self.index,
-                        p.track_id,
-                    )
+                    crate::playlist::variant::generate_audio_playlist(&self.index, p.track_id)
                 } else if self
                     .index
                     // Subtitle only playlist
@@ -249,11 +253,8 @@ impl PlaylistOrSegment {
                     cache_it = true;
                     Ok(buf)
                 } else {
-                    crate::segment::generator::generate_audio_init_segment(
-                        &self.index,
-                        a.track_id,
-                    )
-                    .map(|b| b.to_vec())
+                    crate::segment::generator::generate_audio_init_segment(&self.index, a.track_id)
+                        .map(|b| b.to_vec())
                 }
             }
             UrlType::VttSegment(s) => {

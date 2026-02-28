@@ -24,7 +24,8 @@ pub async fn handle_dynamic_request(
     })?;
 
     // We simply take the url path as the path to the video.
-    let media_path = std::path::PathBuf::from(&hls_url.video_url);
+    let media_path_str = format!("/{}", &hls_url.video_url);
+    let media_path = std::path::PathBuf::from(&media_path_str);
 
     // All code is sync, so spawn it in a separate thread.
     tokio::task::spawn_blocking(move || {

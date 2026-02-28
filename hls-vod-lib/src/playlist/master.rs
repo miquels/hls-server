@@ -6,8 +6,8 @@ use std::collections::{HashMap, HashSet};
 
 use ffmpeg_next as ffmpeg;
 
-use crate::media::StreamIndex;
 use super::codec::*;
+use crate::media::StreamIndex;
 
 /// Generate master playlist content
 ///
@@ -40,9 +40,15 @@ pub fn generate_master_playlist(
     // Remove tracks that aren't enabled.
     let orig_index = index;
     let mut index = index.clone();
-    index.audio_streams.retain(|a| tracks_enabled.contains(&a.stream_index));
-    index.video_streams.retain(|v| tracks_enabled.contains(&v.stream_index));
-    index.subtitle_streams.retain(|s| tracks_enabled.contains(&s.stream_index));
+    index
+        .audio_streams
+        .retain(|a| tracks_enabled.contains(&a.stream_index));
+    index
+        .video_streams
+        .retain(|v| tracks_enabled.contains(&v.stream_index));
+    index
+        .subtitle_streams
+        .retain(|s| tracks_enabled.contains(&s.stream_index));
 
     // Mark tracks to be transcoded (audio only for now).
     for (idx, codec) in transcode.iter() {
@@ -51,23 +57,29 @@ pub fn generate_master_playlist(
         }
     }
 
-    // Filter out unsupported codecs.
+    // Filter out unsupported codecs (only when a codec list was supplied).
+    // When codecs is empty (no ?codecs= query param), keep all audio streams.
     let mut index = index.clone();
-    index.audio_streams.retain(|s| {
-        for codec in codecs {
-            if let Some(codec_id) = codec_id(codec) {
-                if s.codec_id == codec_id || s.transcode_to == Some(codec_id) {
-                    return true;
+    if !codecs.is_empty() {
+        index.audio_streams.retain(|s| {
+            for codec in codecs {
+                if let Some(codec_id) = codec_id(codec) {
+                    if s.codec_id == codec_id || s.transcode_to == Some(codec_id) {
+                        return true;
+                    }
                 }
             }
-        }
-        false
-    });
-    
+            false
+        });
+    }
+
     // Now, if we have no audio streams left, but 'aac' was
     // in the supported list, add transcoded streams.
     if index.audio_streams.is_empty() && !orig_index.audio_streams.is_empty() {
-        let has_aac = codecs.iter().filter_map(|c| codec_id(c)).any(|id| id == ffmpeg::codec::Id::AAC);
+        let has_aac = codecs
+            .iter()
+            .filter_map(|c| codec_id(c))
+            .any(|id| id == ffmpeg::codec::Id::AAC);
         if has_aac {
             for s in &orig_index.audio_streams {
                 if s.codec_id == orig_index.audio_streams[0].codec_id {
@@ -393,8 +405,7 @@ mod tests {
             channels: 2,
             bitrate: 128000,
             language: Some("en".to_string()),
-            is_transcoded: false,
-            source_stream_index: None,
+            transcode_to: None,
             encoder_delay: 0,
         });
 
@@ -404,7 +415,22 @@ mod tests {
     #[test]
     fn test_generate_master_playlist() {
         let index = create_test_index();
-        let playlist = generate_master_playlist(&index, "video.mp4", None, false, false);
+        let tracks: HashSet<usize> = index
+            .video_streams
+            .iter()
+            .map(|v| v.stream_index)
+            .chain(index.audio_streams.iter().map(|a| a.stream_index))
+            .chain(index.subtitle_streams.iter().map(|s| s.stream_index))
+            .collect();
+        let playlist = generate_master_playlist(
+            &index,
+            "video.mp4",
+            None,
+            &[],
+            &tracks,
+            &HashMap::new(),
+            false,
+        );
 
         assert!(playlist.contains("#EXTM3U"));
         assert!(playlist.contains("#EXT-X-VERSION:7"));
@@ -417,7 +443,21 @@ mod tests {
     #[test]
     fn test_generate_master_playlist_with_audio() {
         let index = create_test_index();
-        let playlist = generate_master_playlist(&index, "video.mp4", None, false, false);
+        let tracks: HashSet<usize> = index
+            .video_streams
+            .iter()
+            .map(|v| v.stream_index)
+            .chain(index.audio_streams.iter().map(|a| a.stream_index))
+            .collect();
+        let playlist = generate_master_playlist(
+            &index,
+            "video.mp4",
+            None,
+            &[],
+            &tracks,
+            &HashMap::new(),
+            false,
+        );
 
         assert!(playlist.contains("TYPE=AUDIO"));
         assert!(playlist.contains("LANGUAGE=\"en\""));
@@ -438,7 +478,22 @@ mod tests {
             start_time: 0,
         });
 
-        let playlist = generate_master_playlist(&index, "video.mp4", None, false, false);
+        let tracks: HashSet<usize> = index
+            .video_streams
+            .iter()
+            .map(|v| v.stream_index)
+            .chain(index.audio_streams.iter().map(|a| a.stream_index))
+            .chain(index.subtitle_streams.iter().map(|s| s.stream_index))
+            .collect();
+        let playlist = generate_master_playlist(
+            &index,
+            "video.mp4",
+            None,
+            &[],
+            &tracks,
+            &HashMap::new(),
+            false,
+        );
 
         assert!(playlist.contains("TYPE=SUBTITLES"));
         assert!(playlist.contains("video.mp4/t.2.m3u8"));
@@ -448,7 +503,21 @@ mod tests {
     #[test]
     fn test_generate_master_playlist_interleaved() {
         let index = create_test_index();
-        let playlist = generate_master_playlist(&index, "video.mp4", None, true, false);
+        let tracks: HashSet<usize> = index
+            .video_streams
+            .iter()
+            .map(|v| v.stream_index)
+            .chain(index.audio_streams.iter().map(|a| a.stream_index))
+            .collect();
+        let playlist = generate_master_playlist(
+            &index,
+            "video.mp4",
+            None,
+            &[],
+            &tracks,
+            &HashMap::new(),
+            true,
+        );
 
         assert!(playlist.contains("#EXTM3U"));
         assert!(playlist.contains("#EXT-X-VERSION:7"));
@@ -474,7 +543,22 @@ mod tests {
             start_time: 0,
         });
 
-        let playlist = generate_master_playlist(&index, "video.mp4", None, true, false);
+        let tracks: HashSet<usize> = index
+            .video_streams
+            .iter()
+            .map(|v| v.stream_index)
+            .chain(index.audio_streams.iter().map(|a| a.stream_index))
+            .chain(index.subtitle_streams.iter().map(|s| s.stream_index))
+            .collect();
+        let playlist = generate_master_playlist(
+            &index,
+            "video.mp4",
+            None,
+            &[],
+            &tracks,
+            &HashMap::new(),
+            true,
+        );
 
         assert!(playlist.contains("#EXTM3U"));
         assert!(playlist.contains("video.mp4/t.0+1.m3u8"));
@@ -488,7 +572,15 @@ mod tests {
     #[test]
     fn test_generate_master_playlist_interleaved_force_aac() {
         let index = create_test_index();
-        let playlist = generate_master_playlist(&index, "video.mp4", None, true, true);
+        let tracks: HashSet<usize> = index
+            .video_streams
+            .iter()
+            .map(|v| v.stream_index)
+            .chain(index.audio_streams.iter().map(|a| a.stream_index))
+            .collect();
+        let transcode: HashMap<usize, String> = [(1, "aac".to_string())].into();
+        let playlist =
+            generate_master_playlist(&index, "video.mp4", None, &[], &tracks, &transcode, true);
 
         assert!(playlist.contains("#EXTM3U"));
         assert!(playlist.contains("#EXT-X-VERSION:7"));

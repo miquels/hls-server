@@ -1,29 +1,51 @@
 //! End-to-end integration tests
 
+use crate::media::StreamIndex;
+use crate::params::HlsParams;
 use crate::tests::fixtures::TestMediaInfo;
 use crate::tests::validation::{
     validate_master_playlist, validate_variant_playlist, validate_webvtt, PlaylistType,
     ValidationResult,
 };
-use crate::media::StreamIndex;
-use crate::hlsvideo::HlsParams;
 
 fn get_master(media: &StreamIndex, session: Option<&str>) -> String {
+    use crate::hlsvideo::MainPlaylist;
+    use std::sync::Arc;
     let url = format!("{}.as.m3u8", media.source_path.to_string_lossy());
-    let hls_params = HlsParams::parse(&url).expect("Should parse master URL");
-    if let Some(session) = session {
-        let mut h = hls_params;
-        h.session_id = Some(session.to_string());
-        String::from_utf8(h.generate(media, false, false).unwrap()).unwrap()
-    } else {
-        String::from_utf8(hls_params.generate(media, false, false).unwrap()).unwrap()
+    let mut hls_params = HlsParams::parse(&url).expect("Should parse master URL");
+    if let Some(s) = session {
+        hls_params.session_id = Some(s.to_string());
     }
+    let p = MainPlaylist {
+        hls_params,
+        index: Arc::new(media.clone()),
+        tracks: media
+            .video_streams
+            .iter()
+            .map(|v| v.stream_index)
+            .chain(media.audio_streams.iter().map(|a| a.stream_index))
+            .chain(media.subtitle_streams.iter().map(|s| s.stream_index))
+            .collect(),
+        codecs: Vec::new(),
+        transcode: std::collections::HashMap::new(),
+        interleave: false,
+    };
+    String::from_utf8(p.generate().unwrap()).unwrap()
 }
 
 fn get_variant(media: &StreamIndex, path: &str) -> String {
-    let url = format!("{}/none/{}", media.source_path.to_string_lossy(), path);
+    use crate::hlsvideo::PlaylistOrSegment;
+    use std::sync::Arc;
+    // URL format: <video_file>/<session_id>/<rest>
+    let url = format!(
+        "{}/{}/{}",
+        media.source_path.to_string_lossy(),
+        media.stream_id,
+        path
+    );
     let hls_params = HlsParams::parse(&url).unwrap();
-    String::from_utf8(hls_params.generate(media, false, false).unwrap()).unwrap()
+    let p = PlaylistOrSegment::from_index(hls_params, Arc::new(media.clone()));
+    String::from_utf8(p.generate().unwrap()).unwrap()
 }
 
 fn get_segment(media: &StreamIndex, path: &str) -> Vec<u8> {
@@ -31,9 +53,17 @@ fn get_segment(media: &StreamIndex, path: &str) -> Vec<u8> {
 }
 
 fn try_get_segment(media: &StreamIndex, path: &str) -> Result<Vec<u8>, crate::error::HlsError> {
-    let url = format!("{}/none/{}", media.source_path.to_string_lossy(), path);
+    use crate::hlsvideo::PlaylistOrSegment;
+    use std::sync::Arc;
+    // URL format: <video_file>/<session_id>/<rest>
+    let url = format!(
+        "{}/{}/{}",
+        media.source_path.to_string_lossy(),
+        media.stream_id,
+        path
+    );
     let hls_params = HlsParams::parse(&url).unwrap();
-    hls_params.generate(media, false, false)
+    PlaylistOrSegment::from_index(hls_params, Arc::new(media.clone())).generate()
 }
 
 /// Test the complete stream lifecycle
@@ -47,7 +77,7 @@ pub fn test_stream_lifecycle() -> ValidationResult {
         return ValidationResult::success(); // Skip if asset missing
     }
 
-    let media = StreamIndex::open(&asset_path, &[] as &[&str], None).expect("Parsing failed");
+    let media = StreamIndex::open(&asset_path, None).expect("Parsing failed");
 
     // Generate and validate master playlist
     let master = get_master(&media, Some("testsession"));
@@ -332,8 +362,7 @@ mod tests {
             return;
         }
 
-        let media = StreamIndex::open(&asset_path, &[] as &[&str], None)
-            .expect("Failed to scan webm asset");
+        let media = StreamIndex::open(&asset_path, None).expect("Failed to scan webm asset");
         let _prefix = format!("/streams/{}", media.stream_id);
 
         // Find audio

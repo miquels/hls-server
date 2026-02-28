@@ -7,9 +7,9 @@ use ffmpeg_next::{self as ffmpeg, Rescale};
 
 use crate::error::{HlsError, Result};
 use crate::media::{SegmentInfo, StreamIndex};
-use crate::segment::muxer::Fmp4Muxer;
 use crate::segment::muxer::find_media_segment_offset;
 use crate::segment::muxer::mux_aac_packets_to_fmp4;
+use crate::segment::muxer::Fmp4Muxer;
 use crate::subtitle::decoder::is_bitmap_subtitle_codec;
 use crate::subtitle::extractor::SubtitleExtractor;
 use crate::subtitle::webvtt::{WebVttConfig, WebVttWriter};
@@ -97,7 +97,6 @@ pub(crate) fn generate_audio_init_segment(
     index: &StreamIndex,
     track_index: usize,
 ) -> Result<Bytes> {
-
     // Check if this audio track needs transcoding
     // TODO: add support for more codecs.
     let audio_info = index.get_audio_stream(track_index)?;
@@ -168,7 +167,6 @@ pub(crate) fn generate_interleaved_init_segment(
     video_idx: usize,
     audio_idx: usize,
 ) -> Result<Bytes> {
-
     if index.video_streams.is_empty() || index.audio_streams.is_empty() {
         return Err(HlsError::StreamNotFound(
             "Interleaved segment requires both video and audio streams".to_string(),
@@ -248,13 +246,7 @@ pub(crate) fn generate_interleaved_segment(
         ));
     }
 
-    generate_media_segment_ffmpeg(
-        segment,
-        "av",
-        Some(video_idx),
-        Some(audio_idx),
-        index,
-    )
+    generate_media_segment_ffmpeg(segment, "av", Some(video_idx), Some(audio_idx), index)
 }
 
 /// Fix default_sample_duration in trex boxes
@@ -344,7 +336,6 @@ pub(crate) fn generate_audio_segment(
     sequence: usize,
     _source_path: &Path,
 ) -> Result<Bytes> {
-
     let segment = index.get_segment("audio", sequence)?;
 
     // Check if this track needs transcoding
@@ -363,7 +354,6 @@ fn generate_transcoded_audio_segment(
     audio_info: &crate::media::AudioStreamInfo,
     segment: &SegmentInfo,
 ) -> Result<Bytes> {
-
     // Use the video timebase stored at index time — no need to re-open the file.
     let video_timebase = index.video_timebase;
 
@@ -438,7 +428,6 @@ pub(crate) fn generate_subtitle_segment(
     end_sequence: usize,
     _source_path: &Path,
 ) -> Result<Bytes> {
-
     let start_segment = index.get_segment("subtitle", start_sequence)?;
     let end_segment = index.get_segment("subtitle", end_sequence)?;
 
@@ -714,7 +703,6 @@ fn generate_media_segment_ffmpeg(
     audio_track_index: Option<usize>,
     index: &StreamIndex,
 ) -> Result<Bytes> {
-
     // For interleaved segments, we need to mux both audio and video
     let is_interleaved = segment_type == "av";
 
@@ -746,8 +734,7 @@ fn generate_media_segment_ffmpeg(
                     // TODO: support more codecs than AAC
                     if audio_info.transcode_to == Some(ffmpeg::codec::Id::AAC) {
                         // Use AAC encoder parameters for transcoded audio
-                        let bitrate =
-                            get_recommended_bitrate(audio_info.channels);
+                        let bitrate = get_recommended_bitrate(audio_info.channels);
                         // FIXME: should '2' here be 'audio_info.channels' ?
                         let encoder = AacEncoder::open(HLS_SAMPLE_RATE, 2, bitrate)?;
                         muxer.add_audio_stream(&encoder.codec_parameters(), idx)?;
@@ -1408,8 +1395,7 @@ mod tests {
             channels: 2,
             bitrate: 128000,
             language: Some("en".to_string()),
-            is_transcoded: false,
-            source_stream_index: None,
+            transcode_to: None,
             encoder_delay: 0,
         });
 
@@ -1467,13 +1453,12 @@ mod tests {
             channels: 2,
             bitrate: 128000,
             language: Some("en".to_string()),
-            is_transcoded: false,
-            source_stream_index: None,
+            transcode_to: None,
             encoder_delay: 0,
         });
 
-        let init_segment = generate_audio_init_segment(&index, 1, false)
-            .expect("Failed to generate audio init segment");
+        let init_segment =
+            generate_audio_init_segment(&index, 1).expect("Failed to generate audio init segment");
 
         // Find 'mdhd' box for the audio track and check timescale
         // mdhd version 0:
