@@ -316,9 +316,6 @@ fn patch_tfdts(media_data: &mut Vec<u8>, target_time: u64, start_frag_seq: u32) 
 }
 
 /// Patch only `mfhd.FragmentSequenceNumber` — leave `tfdt` untouched.
-///
-/// Used for interleaved (multi-track) segments where tfdt values are already
-/// correct per-track, but fragment sequence numbers must increase across segments.
 fn patch_mfhd(media_data: &mut Vec<u8>, start_frag_seq: u32) {
     let mut frag_count = 0u32;
 
@@ -330,6 +327,57 @@ fn patch_mfhd(media_data: &mut Vec<u8>, start_frag_seq: u32) {
                 let seq = start_frag_seq.wrapping_add(frag_count);
                 frag_count += 1;
                 payload[4..8].copy_from_slice(&seq.to_be_bytes());
+            }
+        },
+    );
+}
+
+/// Patch `mfhd` sequence numbers AND each track's `tfdt` independently.
+///
+/// For interleaved (multi-track) segments, `delay_moov=true` causes FFmpeg to
+/// shift all timestamps to start near 0.  We must restore the correct target
+/// decode-time for each track separately using its `trak_id` from `tfhd`.
+///
+/// `video_track_id` / `audio_track_id` are the 1-based mp4 track IDs emitted
+/// by the muxer (not the source stream indices).
+fn patch_tfdts_per_track(
+    media_data: &mut Vec<u8>,
+    start_frag_seq: u32,
+    video_track_id: u32,
+    audio_track_id: u32,
+    video_target_tfdt: u64,
+    audio_target_tfdt: u64,
+) {
+    let mut frag_count = 0u32;
+    // Track the last track_id we read from tfhd so tfdt can use it.
+    let mut current_track_id: u32 = 0;
+
+    crate::segment::isobmff::walk_boxes_mut(
+        media_data,
+        &[b"moof", b"traf"],
+        &mut |btype, payload| {
+            if btype == b"mfhd" && payload.len() >= 8 {
+                let seq = start_frag_seq.wrapping_add(frag_count);
+                frag_count += 1;
+                payload[4..8].copy_from_slice(&seq.to_be_bytes());
+            } else if btype == b"tfhd" && payload.len() >= 8 {
+                // tfhd layout: version(1) + flags(3) + track_id(4)
+                current_track_id = u32::from_be_bytes(payload[4..8].try_into().unwrap_or([0; 4]));
+            } else if btype == b"tfdt" && !payload.is_empty() {
+                let target = if current_track_id == video_track_id {
+                    video_target_tfdt
+                } else if current_track_id == audio_track_id {
+                    audio_target_tfdt
+                } else {
+                    return; // unknown track, leave untouched
+                };
+
+                let version = payload[0];
+                if version == 1 && payload.len() >= 12 {
+                    payload[4..12].copy_from_slice(&target.to_be_bytes());
+                } else if payload.len() >= 8 {
+                    payload[4..8].copy_from_slice(&(target as u32).to_be_bytes());
+                }
             }
         },
     );
@@ -876,6 +924,9 @@ fn generate_media_segment_ffmpeg(
     // tfdt value is identical to what FFmpeg encodes in the trun table for the
     // first sample — no rounding discrepancy, no "Decreasing DTS" errors.
     let mut first_packet_dts: Option<i64> = None;
+    // For interleaved segments, also track the first VIDEO packet DTS separately
+    // so we can compute the correct video tfdt independently of audio.
+    let mut first_video_dts: Option<i64> = None;
     for (stream, mut packet) in input.packets() {
         // For interleaved mode, accept both video and audio streams
         // For single-stream mode, only accept the target stream
@@ -981,8 +1032,7 @@ fn generate_media_segment_ffmpeg(
                 if let Some(dts) = packet.dts() {
                     let out_dts = dts.rescale(in_tb, out_tb);
                     packet.set_dts(Some(out_dts));
-                    // Capture the first-packet DTS (must be the same value FFmpeg
-                    // will use as the fragment base in its trun table).
+                    // Capture first-packet DTS for patching later.
                     if first_packet_dts.is_none() {
                         tracing::debug!(
                             "[sync] {} seg={} first_pkt: in_pts={} out_pts={} in_dts={:?} out_dts={} in_tb={}/{} out_tb={}/{}",
@@ -993,6 +1043,13 @@ fn generate_media_segment_ffmpeg(
                             out_tb.numerator(), out_tb.denominator()
                         );
                         first_packet_dts = Some(out_dts);
+                    }
+                    // For interleaved, also capture first video DTS separately.
+                    if is_interleaved
+                        && first_video_dts.is_none()
+                        && crate::ffmpeg_utils::utils::is_video_codec(stream.parameters().id())
+                    {
+                        first_video_dts = Some(out_dts);
                     }
                 } else if first_packet_dts.is_none() {
                     // Fallback: use rescaled PTS if DTS is absent
@@ -1159,17 +1216,53 @@ fn generate_media_segment_ffmpeg(
             );
         }
     } else {
-        // For interleaved segments: patch only mfhd (fragment sequence numbers) to
-        // ensure they increase monotonically across segments — required by CMAF/HLS.
-        // Do NOT patch tfdt: each track's tfdt is already correct from FFmpeg's own
-        // per-track timebase rescaling, and applying a single delta to both tracks
-        // would corrupt whichever track we didn't compute the delta from.
+        // For interleaved segments: patch mfhd AND each track's tfdt independently.
+        // delay_moov=true causes FFmpeg to shift all timestamps to start near 0;
+        // we restore correct per-track target times here.
         let start_frag_seq = (segment.sequence as u32).wrapping_mul(1000).wrapping_add(1);
-        patch_mfhd(&mut media_data, start_frag_seq);
+
+        let video_idx = video_track_index.unwrap_or(stream_indices[0]);
+        let audio_idx = audio_track_index.unwrap_or(stream_indices.last().copied().unwrap_or(0));
+
+        let video_track_id = muxer.get_output_track_id(video_idx).unwrap_or(1);
+        let audio_track_id = muxer.get_output_track_id(audio_idx).unwrap_or(2);
+
+        // Video target: use first video packet DTS (corrects B-frame DTS offset from keyframe).
+        let video_output_tb = muxer
+            .get_output_timebase(video_idx)
+            .unwrap_or(ffmpeg::Rational(1, 90000));
+        let video_target = first_video_dts.or(first_packet_dts).unwrap_or(0).max(0) as u64;
+
+        // Audio target: rescale segment.start_pts to audio timebase, add encoder_delay.
+        // This aligns audio presentation time with the video keyframe presentation time.
+        let audio_output_tb = muxer
+            .get_output_timebase(audio_idx)
+            .unwrap_or(ffmpeg::Rational(1, 48000));
+        let audio_start = crate::ffmpeg_utils::utils::rescale_ts(
+            segment.start_pts,
+            video_timebase,
+            audio_output_tb,
+        );
+        let audio_target = (audio_start + encoder_delay).max(0) as u64;
+
         tracing::debug!(
-            "[sync] av seg={} patched mfhd only (start_frag_seq={})",
+            "[sync] av seg={} per-track patch: v_track_id={} v_target={} ({:.3}s @{}/{}) a_track_id={} a_target={} ({:.3}s @{}/{})",
             segment.sequence,
-            start_frag_seq
+            video_track_id, video_target,
+            video_target as f64 / video_output_tb.denominator() as f64,
+            video_output_tb.numerator(), video_output_tb.denominator(),
+            audio_track_id, audio_target,
+            audio_target as f64 / audio_output_tb.denominator() as f64,
+            audio_output_tb.numerator(), audio_output_tb.denominator(),
+        );
+
+        patch_tfdts_per_track(
+            &mut media_data,
+            start_frag_seq,
+            video_track_id,
+            audio_track_id,
+            video_target,
+            audio_target,
         );
     }
 
