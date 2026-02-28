@@ -951,6 +951,8 @@ fn generate_media_segment_ffmpeg(
     // For interleaved segments, also track the first VIDEO packet DTS separately
     // so we can compute the correct video tfdt independently of audio.
     let mut first_video_dts: Option<i64> = None;
+    // And track the first AUDIO packet DTS separately to align its tfdt perfectly.
+    let mut first_audio_dts: Option<i64> = None;
     for (stream, mut packet) in input.packets() {
         // For interleaved mode, accept both video and audio streams
         // For single-stream mode, only accept the target stream
@@ -1068,12 +1070,19 @@ fn generate_media_segment_ffmpeg(
                         );
                         first_packet_dts = Some(out_dts);
                     }
-                    // For interleaved, also capture first video DTS separately.
-                    if is_interleaved
-                        && first_video_dts.is_none()
-                        && crate::ffmpeg_utils::utils::is_video_codec(stream.parameters().id())
-                    {
-                        first_video_dts = Some(out_dts);
+                    // For interleaved, also capture first video/audio DTS separately.
+                    if is_interleaved {
+                        if crate::ffmpeg_utils::utils::is_video_codec(stream.parameters().id()) {
+                            if first_video_dts.is_none() {
+                                first_video_dts = Some(out_dts);
+                            }
+                        } else if crate::ffmpeg_utils::utils::is_audio_codec(
+                            stream.parameters().id(),
+                        ) {
+                            if first_audio_dts.is_none() {
+                                first_audio_dts = Some(out_dts);
+                            }
+                        }
                     }
                 } else if first_packet_dts.is_none() {
                     // Fallback: use rescaled PTS if DTS is absent
@@ -1257,17 +1266,21 @@ fn generate_media_segment_ffmpeg(
             .unwrap_or(ffmpeg::Rational(1, 90000));
         let video_target = first_video_dts.or(first_packet_dts).unwrap_or(0).max(0) as u64;
 
-        // Audio target: rescale segment.start_pts to audio timebase, add encoder_delay.
-        // This aligns audio presentation time with the video keyframe presentation time.
+        // Audio target: use first audio packet DTS (corrects delay_moov zero-shift identically).
+        // If we don't have it, fallback to start_pts.
         let audio_output_tb = muxer
             .get_output_timebase(audio_idx)
             .unwrap_or(ffmpeg::Rational(1, 48000));
-        let audio_start = crate::ffmpeg_utils::utils::rescale_ts(
-            segment.start_pts,
-            video_timebase,
-            audio_output_tb,
-        );
-        let audio_target = (audio_start + encoder_delay).max(0) as u64;
+        let audio_target = if let Some(a_dts) = first_audio_dts {
+            a_dts.max(0) as u64
+        } else {
+            let audio_start = crate::ffmpeg_utils::utils::rescale_ts(
+                segment.start_pts,
+                video_timebase,
+                audio_output_tb,
+            );
+            (audio_start + encoder_delay).max(0) as u64
+        };
 
         tracing::debug!(
             "[sync] av seg={} per-track patch: v_track_id={} v_target={} ({:.3}s @{}/{}) a_track_id={} a_target={} ({:.3}s @{}/{})",
