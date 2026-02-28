@@ -774,15 +774,14 @@ fn generate_media_segment_ffmpeg(
         )));
     }
 
-    // Write header WITHOUT delay_moov for video segments.
+    // Write header WITHOUT delay_moov for video and interleaved segments.
     // delay_moov causes FFmpeg to emit a pre-roll moof[0] containing B-frames with
     // large composition-time offsets. Those frames display within the segment but
-    // their presence makes the first *displayable* PTS of the segment appear hundreds
-    // of milliseconds after the last displayable PTS of the previous segment —
-    // producing a visible freeze/jump at every segment boundary.
-    // Without delay_moov, the first moof starts at the keyframe DTS directly,
-    // giving smooth PTS continuity across segment boundaries.
-    let _init_bytes = muxer.write_header(segment_type != "video")?;
+    // for mid-stream seeks their PTS values fall BEFORE segment start — causing
+    // the player to jump backward then forward when seeking.
+    // Without delay_moov, the first moof starts at the keyframe DTS directly.
+    // Audio-only segments still need delay_moov to correctly handle encoder pre-roll.
+    let _init_bytes = muxer.write_header(segment_type == "audio")?;
 
     // Encoder delay: the number of samples (in output timebase) that the codec
     // prepends as pre-roll before the first presented sample.  FFmpeg signals this
