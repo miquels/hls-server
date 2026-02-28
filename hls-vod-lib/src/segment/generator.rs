@@ -349,8 +349,11 @@ fn patch_tfdts_per_track(
     audio_target_tfdt: u64,
 ) {
     let mut frag_count = 0u32;
-    // Track the last track_id we read from tfhd so tfdt can use it.
+    // Track the last track_id we read from tfhd
     let mut current_track_id: u32 = 0;
+
+    let mut video_tfdt_delta: Option<i64> = None;
+    let mut audio_tfdt_delta: Option<i64> = None;
 
     crate::segment::isobmff::walk_boxes_mut(
         media_data,
@@ -364,19 +367,40 @@ fn patch_tfdts_per_track(
                 // tfhd layout: version(1) + flags(3) + track_id(4)
                 current_track_id = u32::from_be_bytes(payload[4..8].try_into().unwrap_or([0; 4]));
             } else if btype == b"tfdt" && !payload.is_empty() {
-                let target = if current_track_id == video_track_id {
-                    video_target_tfdt
-                } else if current_track_id == audio_track_id {
-                    audio_target_tfdt
+                let version = payload[0];
+                let (current_tfdt, value_offset) = if version == 1 && payload.len() >= 12 {
+                    (u64::from_be_bytes(payload[4..12].try_into().unwrap()), 4)
+                } else if payload.len() >= 8 {
+                    (
+                        u32::from_be_bytes(payload[4..8].try_into().unwrap()) as u64,
+                        4,
+                    )
                 } else {
-                    return; // unknown track, leave untouched
+                    (0, 0)
                 };
 
-                let version = payload[0];
-                if version == 1 && payload.len() >= 12 {
-                    payload[4..12].copy_from_slice(&target.to_be_bytes());
-                } else if payload.len() >= 8 {
-                    payload[4..8].copy_from_slice(&(target as u32).to_be_bytes());
+                if value_offset > 0 {
+                    if current_track_id == video_track_id {
+                        if video_tfdt_delta.is_none() {
+                            video_tfdt_delta = Some(video_target_tfdt as i64 - current_tfdt as i64);
+                        }
+                        let new_tfdt = (current_tfdt as i64 + video_tfdt_delta.unwrap()) as u64;
+                        if version == 1 {
+                            payload[4..12].copy_from_slice(&new_tfdt.to_be_bytes());
+                        } else {
+                            payload[4..8].copy_from_slice(&(new_tfdt as u32).to_be_bytes());
+                        }
+                    } else if current_track_id == audio_track_id {
+                        if audio_tfdt_delta.is_none() {
+                            audio_tfdt_delta = Some(audio_target_tfdt as i64 - current_tfdt as i64);
+                        }
+                        let new_tfdt = (current_tfdt as i64 + audio_tfdt_delta.unwrap()) as u64;
+                        if version == 1 {
+                            payload[4..12].copy_from_slice(&new_tfdt.to_be_bytes());
+                        } else {
+                            payload[4..8].copy_from_slice(&(new_tfdt as u32).to_be_bytes());
+                        }
+                    }
                 }
             }
         },
