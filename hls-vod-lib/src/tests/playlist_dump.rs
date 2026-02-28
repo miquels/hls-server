@@ -1,11 +1,8 @@
 use crate::media::StreamIndex;
-use crate::playlist::master::generate_master_playlist;
-use crate::playlist::variant::{generate_audio_playlist, generate_video_playlist};
-use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 #[test]
-fn dump_playlists_full_video_alex() {
+fn debug_index_video_alex() {
     let video_path = PathBuf::from("/Users/mikevs/Devel/hls-server/video-alex.mp4");
     if !video_path.exists() {
         println!("File not found: {:?}", video_path);
@@ -14,40 +11,43 @@ fn dump_playlists_full_video_alex() {
 
     let index = StreamIndex::open(&video_path, None).expect("Failed to scan file");
 
-    let video_url = "video-alex.mp4";
-    let session_id = Some("debug-session");
-    let codecs = Vec::new();
+    println!("Stream ID: {}", index.stream_id);
+    println!("Duration: {} s", index.duration_secs);
+    println!("Video streams: {}", index.video_streams.len());
+    println!("Audio streams: {}", index.audio_streams.len());
+    println!("Segments: {}", index.segments.len());
 
-    // IMPORTANT: Enable all tracks to see the full playlist
-    let mut tracks_enabled = HashSet::new();
-    for v in &index.video_streams {
-        tracks_enabled.insert(v.stream_index);
-    }
-    for a in &index.audio_streams {
-        tracks_enabled.insert(a.stream_index);
-    }
-    for s in &index.subtitle_streams {
-        tracks_enabled.insert(s.stream_index);
+    for (i, v) in index.video_streams.iter().enumerate() {
+        println!(
+            "Video {}: codec={:?}, bitrate={}, fps={:?}",
+            i, v.codec_id, v.bitrate, v.framerate
+        );
     }
 
-    let transcode = HashMap::new();
-    let interleaved = false;
+    for (i, a) in index.audio_streams.iter().enumerate() {
+        println!(
+            "Audio {}: codec={:?}, bitrate={}, rate={}, lang={:?}",
+            i, a.codec_id, a.bitrate, a.sample_rate, a.language
+        );
+    }
 
-    println!("--- MASTER PLAYLIST ---");
-    let master = generate_master_playlist(
-        &index,
-        video_url,
-        session_id,
-        &codecs,
-        &tracks_enabled,
-        &transcode,
-        interleaved,
-    );
-    println!("{}", master);
+    if let Some(first) = index.segments.first() {
+        println!(
+            "Seg 0: start_pts={}, end_pts={}, duration={}",
+            first.start_pts, first.end_pts, first.duration_secs
+        );
+    }
 
-    println!("--- VIDEO PLAYLIST (HEAD) ---");
-    let video_playlist = generate_video_playlist(&index);
-    for line in video_playlist.lines().take(20) {
-        println!("{}", line);
+    if let Some(last) = index.segments.last() {
+        println!(
+            "Last Seg: start_pts={}, end_pts={}, duration={}",
+            last.start_pts, last.end_pts, last.duration_secs
+        );
+        let total_duration = (last.end_pts as f64) * index.video_timebase.numerator() as f64
+            / index.video_timebase.denominator() as f64;
+        println!(
+            "Total calculated duration from segments: {} s",
+            total_duration
+        );
     }
 }
