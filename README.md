@@ -74,21 +74,17 @@ docker run -p 3000:3000 -v ./media:/app/media:ro hls-server
 | Endpoint | Description |
 |----------|-------------|
 | `GET /{*path}.mp4.as.m3u8` | Master playlist for an MP4 file |
-| `GET /{*path}.mkv.as.m3u8` | Master playlist for an MKV file |
-| `GET /{*path}.webm.as.m3u8` | Master playlist for a WebM file |
-| `GET /{*path}.ext/v/media.m3u8` | Video variant playlist |
-| `GET /{*path}.ext/a/{track}.m3u8` | Audio variant playlist |
-| `GET /{*path}.ext/s/{track}.m3u8` | Subtitle variant playlist |
+| `GET /{*path}.mp4/t.1.m3u8` | Variant playlist |
 
 ### Segments
 
 | Endpoint | Description |
 |----------|-------------|
-| `GET /{*path}.ext/v/{track}.init.mp4` | Video initialization segment (fMP4 header) |
-| `GET /{*path}.ext/v/{track}.{n}.m4s` | Video segment |
-| `GET /{*path}.ext/a/{track}.init.mp4` | Audio initialization segment |
-| `GET /{*path}.ext/a/{track}.{n}.m4s` | Audio segment |
-| `GET /{*path}.ext/s/{track}.{n}.vtt` | Subtitle segment (WebVTT) |
+| `GET /{*path}.mp4/v/{track}.init.mp4` | Video initialization segment (fMP4 header) |
+| `GET /{*path}.mp4/v/{track}.{n}.m4s` | Video segment |
+| `GET /{*path}.mp4/a/{track}.init.mp4` | Audio initialization segment |
+| `GET /{*path}.mp4/a/{track}.{n}.m4s` | Audio segment |
+| `GET /{*path}.mp4/s/{track}.{n}.vtt` | Subtitle segment (WebVTT) |
 
 ### Monitoring
 
@@ -102,12 +98,7 @@ docker run -p 3000:3000 -v ./media:/app/media:ro hls-server
 
 ### Play a Stream Directly via File Path
 
-Streams are now implicitly registered when requested! You don't need a `POST` request to start a stream. Ensure you mount your media folder and make the request directly. For example, if you want to stream `/media/movies/video-alex.mp4`, simply append `.as.m3u8`.
-
-**VLC:**
-```bash
-vlc http://localhost:3000/media/movies/video-alex.mp4.as.m3u8
-```
+Streams are implicitly registered when requested! Ensure you mount your media folder and make the request directly. For example, if you want to stream `/media/movies/video.mp4`, simply append `.as.m3u8`.
 
 **Browser (hls.js):**
 ```html
@@ -116,14 +107,14 @@ vlc http://localhost:3000/media/movies/video-alex.mp4.as.m3u8
 <script>
   const video = document.getElementById('video');
   const hls = new Hls();
-  hls.loadSource('http://localhost:3000/media/movies/video-alex.mp4.as.m3u8');
+  hls.loadSource('http://localhost:3000/media/movies/video.mp4.as.m3u8');
   hls.attachMedia(video);
 </script>
 ```
 
 **iOS/macOS Safari:**
 ```html
-<video controls src="http://localhost:3000/media/movies/video-alex.mp4.as.m3u8"></video>
+<video controls src="http://localhost:3000/media/movies/video.mp4.as.m3u8"></video>
 ```
 
 ### List Active Cached Streams
@@ -203,6 +194,7 @@ Prometheus-compatible metrics at `/metrics`:
 ### Input Containers
 - MP4 (.mp4, .m4v)
 - Matroska (.mkv)
+- WebM (.webm)
 
 ### Video Codecs (Direct Copy)
 - H.264/AVC
@@ -210,15 +202,15 @@ Prometheus-compatible metrics at `/metrics`:
 - VP9
 - AV1
 
-### Audio Codecs
-| Codec | Action | Output |
-|-------|--------|--------|
-| AAC | Copy | AAC |
-| AC-3 | Copy + Transcode | AC-3 + AAC |
-| E-AC-3 | Copy + Transcode | E-AC-3 + AAC |
-| Opus | Transcode | AAC |
-| MP3 | Transcode | AAC |
-| FLAC | Transcode | AAC |
+### Audio Codecs (Direct Copy)
+- AAC
+- AC-3
+- E-AC-3
+- Opus
+- MP3
+- FLAC
+
+Non-supported codecs can be transcoded into AAC on-the-fly.
 
 ### Subtitle Formats
 | Format | Support | Output |
@@ -246,10 +238,10 @@ cargo tarpaulin --out Html
 
 Typical performance on modern hardware:
 
-- **Startup Time**: < 5 seconds (indexed MP4)
-- **Segment Latency**: < 10ms (cached), < 100ms (cache miss)
+- **Startup Time**: < 3 seconds (indexed MP4)
+- **Segment Latency**: < 5ms (cached), < 100ms (cache miss)
 - **Memory Usage**: < 1GB for 2-hour movie (512MB cache)
-- **CPU Usage**: < 10% (direct copy), < 50% (with transcoding)
+- **CPU Usage**: < 5% (direct copy), < 20% (with transcoding)
 
 ## License
 
