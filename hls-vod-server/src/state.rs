@@ -8,21 +8,11 @@
 //! - Server configuration
 
 use std::sync::atomic::AtomicBool;
-use std::sync::Arc;
-
-use dashmap::DashMap;
-use tokio::sync::OnceCell;
-
-use hls_vod_lib::StreamIndex;
 
 use crate::config::ServerConfig;
 
 /// Application state shared across all handlers
 pub struct AppState {
-    // Used to deduplicate indexing requests for the same relative path.
-    // The key is the file path. The OnceCell will contain the MediaInfo instance.
-    pub indexing_in_flight: DashMap<String, Arc<OnceCell<Arc<StreamIndex>>>>,
-
     /// Server shutdown flag
     pub shutdown: AtomicBool,
 
@@ -35,7 +25,6 @@ impl AppState {
         hls_vod_lib::init_segment_cache(config.cache.clone());
 
         Self {
-            indexing_in_flight: DashMap::new(),
             shutdown: AtomicBool::new(false),
             config,
         }

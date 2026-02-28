@@ -1,22 +1,7 @@
 use std::fmt;
 use std::str::FromStr;
 
-use crate::types::StreamIndex;
-
-/// To work with a HlsUrl:
-///
-/// // Parse url.
-/// let hls_url = HlsUrl::parse(url).ok_or(ErrorNotFound)?;
-///
-/// // Find video file on filesystem.
-/// let video = map_url_to_file(&hls_url.video)?;
-///
-/// // Open video file.
-/// let media_info = StreamIndex::open(&video)?;
-///
-/// // Generate playlist or segment.
-/// return hls_url.generate(&media_info);
-///
+/// HlsUrl contains a video playlist or segment decoded from a URL.
 #[derive(Debug)]
 pub struct HlsUrl {
     /// Enum of subtype.
@@ -190,157 +175,34 @@ impl HlsUrl {
         self.to_string()
     }
 
-    /// Generate the playlist or segment.
-    // TODO: returns Bytes instead of Vec<u8>
-    pub fn generate(
-        &self,
-        media_info: &StreamIndex,
-        interleaved: bool,
-        force_aac: bool,
-    ) -> crate::error::Result<Vec<u8>> {
-        // See if it's in the cache.
-        let segment_key = self.to_string();
-        if let Some(c) = crate::segment::cache::get() {
-            if let Some(b) = c.get(&media_info.stream_id, &segment_key) {
-                return Ok(b.to_vec());
-            }
-        }
-        let mut cache_it = false;
-
-        let data = match &self.url_type {
-            UrlType::MainPlaylist => {
-                let playlist = crate::playlist::generate_master_playlist(
-                    media_info,
-                    &self.video_url,
-                    Some(&media_info.stream_id),
-                    interleaved,
-                    force_aac,
-                );
-                Ok(playlist.into_bytes())
-            }
-            UrlType::Playlist(p) => {
-                let playlist = if let Some(audio_idx) = p.audio_track_id {
-                    // Audio / Video interleaved playlist
-                    let force_aac_track = p.audio_transcode_to.as_deref() == Some("aac");
-                    crate::playlist::variant::generate_interleaved_playlist(
-                        media_info,
-                        p.track_id,
-                        audio_idx,
-                        force_aac_track,
-                    )
-                } else if media_info
-                    .audio_streams
-                    .iter()
-                    .any(|a| a.stream_index == p.track_id)
-                {
-                    // Audio only playlist
-                    let force_aac_track = p.audio_transcode_to.as_deref() == Some("aac");
-                    crate::playlist::variant::generate_audio_playlist(
-                        media_info,
-                        p.track_id,
-                        force_aac_track,
-                    )
-                } else if media_info
-                    // Subtitle only playlist
-                    .subtitle_streams
-                    .iter()
-                    .any(|s| s.stream_index == p.track_id)
-                {
-                    crate::playlist::variant::generate_subtitle_playlist(media_info, p.track_id)
-                } else {
-                    // Main video playlist.
-                    crate::playlist::variant::generate_video_playlist(media_info)
-                };
-                Ok(playlist.into_bytes())
-            }
+    /// Return the MIME type.
+    pub(crate) fn mime_type(&self) -> &'static str {
+        match &self.url_type {
+            UrlType::MainPlaylist | UrlType::Playlist(_) => "application/vnd.apple.mpegurl",
             UrlType::VideoSegment(v) => {
-                if let Some(audio_idx) = v.audio_track_id {
-                    let force_aac_track = v.audio_transcode_to.as_deref() == Some("aac");
-                    if let Some(seq) = v.segment_id {
-                        // TODO: make segments a HashMap<u64, Segment> ?
-                        let segment = media_info.get_segment("video", seq)?;
-                        let buf = crate::segment::generator::generate_interleaved_segment(
-                            media_info,
-                            v.track_id,
-                            audio_idx,
-                            segment,
-                            &media_info.source_path,
-                            force_aac_track,
-                        )
-                        .map(|b| b.to_vec())?;
-                        cache_it = true;
-                        Ok(buf)
-                    } else {
-                        crate::segment::generator::generate_interleaved_init_segment(
-                            media_info,
-                            v.track_id,
-                            audio_idx,
-                            force_aac_track,
-                        )
-                        .map(|b| b.to_vec())
-                    }
-                } else if let Some(seq) = v.segment_id {
-                    let buf = crate::segment::generator::generate_video_segment(
-                        media_info,
-                        v.track_id,
-                        seq,
-                        &media_info.source_path,
-                    )
-                    .map(|b| b.to_vec())?;
-                    cache_it = true;
-                    Ok(buf)
+                if v.segment_id.is_none() {
+                    "video/mp4"
                 } else {
-                    crate::segment::generator::generate_video_init_segment(media_info)
-                        .map(|b| b.to_vec())
+                    "video/iso.segment"
                 }
             }
             UrlType::AudioSegment(a) => {
-                let force_aac_track = a.transcode_to.as_deref() == Some("aac");
-                if let Some(seq) = a.segment_id {
-                    let buf = crate::segment::generator::generate_audio_segment(
-                        media_info,
-                        a.track_id,
-                        seq,
-                        &media_info.source_path,
-                        force_aac_track,
-                    )
-                    .map(|b| b.to_vec())?;
-                    cache_it = true;
-                    Ok(buf)
+                if a.segment_id.is_none() {
+                    "video/mp4"
                 } else {
-                    crate::segment::generator::generate_audio_init_segment(
-                        media_info,
-                        a.track_id,
-                        force_aac_track,
-                    )
-                    .map(|b| b.to_vec())
+                    "audio/mp4"
                 }
             }
-            UrlType::VttSegment(s) => {
-                let buf = crate::segment::generator::generate_subtitle_segment(
-                    media_info,
-                    s.track_id,
-                    s.start_cue,
-                    s.end_cue,
-                    &media_info.source_path,
-                )
-                .map(|b| b.to_vec())?;
-                cache_it = true;
-                Ok(buf)
-            }
-        }?;
-
-        if cache_it {
-            if let Some(c) = crate::segment::cache::get() {
-                c.insert(
-                    &media_info.stream_id,
-                    &segment_key,
-                    bytes::Bytes::from(data.clone()),
-                );
-            }
+            UrlType::VttSegment(_) => "text/vtt",
         }
+    }
 
-        Ok(data)
+    /// Return cache-control header hint.
+    pub(crate) fn cache_control(&self) -> &'static str {
+        match &self.url_type {
+            UrlType::MainPlaylist | UrlType::Playlist(_) => "no-cache",
+            _ => "max-age=3600",
+        }
     }
 }
 

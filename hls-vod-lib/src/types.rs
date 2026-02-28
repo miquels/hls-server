@@ -78,12 +78,10 @@ pub struct AudioStreamInfo {
     pub bitrate: u64,
     /// Language code as specified in the source file metadata
     pub language: Option<String>,
-    /// Boolean flag indicating if this stream needs to be transcoded to AAC
-    pub is_transcoded: bool,
-    /// If transcoded, the index of the original source stream
-    pub source_stream_index: Option<usize>,
     /// Encoder delay in stream-native timebase samples (e.g. 1024 @ 48kHz for AAC).
     pub encoder_delay: i64,
+    /// transcode to other codec.
+    pub transcode_to: Option<ffmpeg::codec::Id>,
 }
 
 /// A reference to a single subtitle sample in the source file.
@@ -349,18 +347,15 @@ impl StreamIndex {
         })
     }
 
-    pub fn get_segment(
-        &self,
-        segment_type: &str,
-        start_sequence: usize,
-    ) -> Result<&'_ SegmentInfo> {
+    pub fn get_segment(&self, segment_type: &str, sequence: usize) -> Result<&'_ SegmentInfo> {
+        // TODO: segments should be a HashMap<u64, Segment> ?
         self.segments
             .iter()
-            .find(|s| s.sequence == start_sequence)
+            .find(|s| s.sequence == sequence)
             .ok_or_else(|| HlsError::SegmentNotFound {
                 stream_id: self.stream_id.clone(),
                 segment_type: segment_type.to_string(),
-                sequence: start_sequence,
+                sequence,
             })
     }
 
@@ -384,7 +379,6 @@ impl StreamIndex {
 
     pub fn open(
         path: &Path,
-        codecs: &[impl AsRef<str>],
         stream_id: Option<String>,
     ) -> Result<Arc<StreamIndex>> {
         if let Some(id) = &stream_id {
@@ -402,66 +396,6 @@ impl StreamIndex {
 
         if let Some(id) = stream_id {
             index.stream_id = id;
-        }
-
-        // Apply codec filtering if codecs are provided
-        if !codecs.is_empty() {
-            let codec_strs_lower: Vec<String> =
-                codecs.iter().map(|c| c.as_ref().to_lowercase()).collect();
-            let original_audio_streams = index.audio_streams.clone();
-
-            // Filter audio streams
-            index.audio_streams.retain(|a| {
-                let browser_codecs = match a.codec_id {
-                    ffmpeg::codec::Id::AAC => ["mp4a.40.2", "aac"].as_slice(),
-                    ffmpeg::codec::Id::AC3 => ["ac-3", "ac3"].as_slice(),
-                    ffmpeg::codec::Id::EAC3 => ["ec-3", "eac3"].as_slice(),
-                    ffmpeg::codec::Id::MP3 => ["mp4a.40.34", "mp3"].as_slice(),
-                    ffmpeg::codec::Id::OPUS => ["opus"].as_slice(),
-                    _ => [].as_slice(),
-                };
-
-                if browser_codecs
-                    .iter()
-                    .any(|&m| codec_strs_lower.contains(&m.to_string()))
-                {
-                    return true;
-                }
-
-                // Fallback to exact enum match
-                let codec_name = format!("{:?}", a.codec_id).to_lowercase();
-                codec_strs_lower.contains(&codec_name)
-            });
-
-            // Filter subtitle streams (typically 'webvtt' or 'wvtt')
-            index.subtitle_streams.retain(|s| {
-                let codec_name = match s.codec_id {
-                    ffmpeg::codec::Id::WEBVTT => "wvtt",
-                    _ => "",
-                };
-                codec_strs_lower.contains(&codec_name.to_string())
-                    || codec_strs_lower.contains(&"webvtt".to_string())
-            });
-
-            // If we filtered out all audio streams, but the source had audio streams,
-            // we should transcode all audio streams matching the codec of the primary
-            // audio stream to AAC, ONLY IF "aac" or "mp4a.40.2" is in the supported codecs list.
-            if index.audio_streams.is_empty()
-                && !original_audio_streams.is_empty()
-                && (codec_strs_lower.contains(&"aac".to_string())
-                    || codec_strs_lower.contains(&"mp4a.40.2".to_string()))
-            {
-                let fallback_codec = original_audio_streams[0].codec_id;
-                for mut fallback in original_audio_streams
-                    .into_iter()
-                    .filter(|s| s.codec_id == fallback_codec)
-                {
-                    fallback.is_transcoded = true;
-                    // Note: We keep the original codec_id in the stream info so the transcoder
-                    // knows what to decode FROM. `TrackInfo` will map `is_transcoded` to "aac".
-                    index.audio_streams.push(fallback);
-                }
-            }
         }
 
         let media = Arc::new(index);
@@ -499,6 +433,14 @@ impl StreamIndex {
                     .unwrap_or(false)
             })
             .collect()
+    }
+
+    pub fn get_audio_stream(&self, stream_index: usize) -> Option<&'_ AudioStreamInfo> {
+        self.audio_streams.iter().find(|s| s.stream_index == stream_index)
+    }
+
+    pub fn get_audio_stream_mut(&mut self, stream_index: usize) -> Option<&'_ mut AudioStreamInfo> {
+        self.audio_streams.iter_mut().find(|s| s.stream_index == stream_index)
     }
 
     pub fn is_vod(&self) -> bool {

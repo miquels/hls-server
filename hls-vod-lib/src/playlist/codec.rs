@@ -30,10 +30,10 @@ pub fn get_audio_codec_string(codec_id: ffmpeg::codec::Id) -> Option<&'static st
         ffmpeg::codec::Id::AAC => Some("mp4a.40.2"),  // AAC-LC
         ffmpeg::codec::Id::AC3 => Some("ac-3"),       // Dolby Digital
         ffmpeg::codec::Id::EAC3 => Some("ec-3"),      // Dolby Digital Plus
+        ffmpeg::codec::Id::FLAC => Some("flac"),      // FLAC
+        ffmpeg::codec::Id::MP3 => Some("mp4a.40.34"), // MP3
         ffmpeg::codec::Id::OPUS => Some("Opus"),      // Opus
         ffmpeg::codec::Id::VORBIS => Some("vorbis"),  // Vorbis
-        ffmpeg::codec::Id::MP3 => Some("mp4a.40.34"), // MP3
-        ffmpeg::codec::Id::FLAC => Some("flac"),      // FLAC
         _ => None,
     }
 }
@@ -163,6 +163,84 @@ pub fn calculate_bandwidth(bitrate: u64, audio_bitrates: &[u32]) -> u64 {
     // FFmpeg's bitrate metadata underestimates actual peak, so a generous
     // margin ensures the declared BANDWIDTH >= any measured segment peak.
     total * 160 / 100
+}
+
+pub fn codec_id(name: &str) -> Option<ffmpeg::codec::Id> {
+    Some(match name {
+        "mp4a.40.2" => ffmpeg::codec::Id::AAC,
+        "aac" => ffmpeg::codec::Id::AAC,
+        "ac-3" => ffmpeg::codec::Id::AC3,
+        "ac3" => ffmpeg::codec::Id::AC3,
+        "ec-3" => ffmpeg::codec::Id::EAC3,
+        "eac3" => ffmpeg::codec::Id::EAC3,
+        "flac" => ffmpeg::codec::Id::FLAC,
+        "mp4a.40.34" => ffmpeg::codec::Id::MP3,
+        "mp3" => ffmpeg::codec::Id::MP3,
+        "Opus" => ffmpeg::codec::Id::OPUS,
+        "opus" => ffmpeg::codec::Id::OPUS,
+        "vorbis" => ffmpeg::codec::Id::VORBIS,
+        _ => None?,
+    })
+}
+
+pub fn codec_name(codec_id: ffmpeg::codec::Id) -> String {
+    match codec_id {
+        ffmpeg::codec::Id::AAC => "mp4a.40.2".to_string(),
+        ffmpeg::codec::Id::AC3 => "ac-3".to_string(),
+        ffmpeg::codec::Id::EAC3 => "ec-3".to_string(),
+        ffmpeg::codec::Id::FLAC => "flac".to_string(),
+        ffmpeg::codec::Id::MP3 => "mp4a.40.34".to_string(),
+        ffmpeg::codec::Id::OPUS => "opus".to_string(),
+        ffmpeg::codec::Id::VORBIS => "vorbis".to_string(),
+        _ => format!("{:?}", codec_id).to_lowercase(),
+    }
+}
+
+pub fn codec_name_short(codec_id: ffmpeg::codec::Id, fallback: Option<&str>) -> String {
+    match codec_id {
+        ffmpeg::codec::Id::AAC => "aac".to_string(),
+        ffmpeg::codec::Id::AC3 => "ac3".to_string(),
+        ffmpeg::codec::Id::EAC3 => "ec3".to_string(),
+        ffmpeg::codec::Id::FLAC => "flac".to_string(),
+        ffmpeg::codec::Id::MP3 => "mp3".to_string(),
+        ffmpeg::codec::Id::OPUS => "opus".to_string(),
+        ffmpeg::codec::Id::VORBIS => "vorbis".to_string(),
+        _ => fallback.map(|s| s.to_string()).unwrap_or_else(|| format!("{:?}", codec_id).to_lowercase()),
+    }
+}
+
+pub fn codec_name_normalized(name: &str) -> Option<String> {
+    codec_id(name).map(codec_name)
+}
+
+pub fn codec_label(codec_id: ffmpeg::codec::Id) -> &'static str {
+    match codec_id {
+        ffmpeg::codec::Id::AAC => "AAC",
+        ffmpeg::codec::Id::AC3 => "Dolby Digital",
+        ffmpeg::codec::Id::EAC3 => "Dolby Digital Plus",
+        ffmpeg::codec::Id::FLAC => "Flac",
+        ffmpeg::codec::Id::MP3 => "MP3",
+        ffmpeg::codec::Id::OPUS => "Opus",
+        ffmpeg::codec::Id::VORBIS => "Vorbis",
+        _ => "Audio",
+    }
+}
+
+// Convert 3-letter language code to 2-letter (RFC5646)
+pub fn to_rfc5646(lang: &str) -> &str {
+    match lang {
+        "eng" => "en",
+        "fre" => "fr",
+        "ger" => "de",
+        "spa" => "es",
+        "ita" => "it",
+        "jpn" => "ja",
+        "kor" => "ko",
+        "chi" => "zh",
+        "rus" => "ru",
+        "por" => "pt",
+        _ => lang,
+    }
 }
 
 #[cfg(test)]

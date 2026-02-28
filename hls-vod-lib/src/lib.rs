@@ -8,30 +8,44 @@
 //! ## Core Features
 //!
 //! - **On-the-fly Packaging:** Muxes existing compatible video (e.g., H.264) directly into fMP4 without transcoding.
-//! - **Audio Transcoding:** Transcodes unsupported audio formats (like AC-3 or Opus) to AAC on-the-fly.
+//! - **Audio Transcoding:** Can transcode audio on-the-fly.
 //! - **Multiple Tracks:** Supports multiple audio and subtitle tracks, accurately multiplexing them into HLS variant playlists.
-//! - **Subtitle Support:** Extracts and serves subtitles (e.g., SubRip) as WebVTT segments.
+//! - **Subtitle Support:** Extracts and serves embedded subtitles (tx3g, srt, vtt) as WebVTT segments.
 //!
 //! ## Usage
 //!
-//! 1. **Initialization:** Call `init()` and `install_log_filter()` at startup. `init_segment_cache()` too
-//!    if you want to enable the segment cache.
-//! 2. **Parsing:** Use `MediaInfo::open` to scan a media file and return an `<Arc<MediaInfo>` struct.
-//!    The information is cached, it's cheap to call after the first tume.
-//! 3. **Playlists:**
-//!    - Generate a master playlist with `MediaInfo::generate_main_playlist`.
-//!    - Generate variant playlists (video/audio/subtitle) with `MediaInfo::generate_track_playlist`.
-//! 4. **Segments:** Generate actual media segments (fMP4 or WebVTT) handling specific sequence requests with `MediaInfo::generate_segment`.
-
+//! ```
+//! // Parse the URL path.
+//! let hls_url = hls_vod_lib::HlsUrl::parse(&url_path)?;
+//! 
+//! // Calculate path to video file.
+//! let media_path = std::path::PathBuf::from(&format!("/{}", hls_url.video_url));
+//!
+//! // Open video.
+//! let hls_video = HlsVideo::new(&media_path, hls_url)?;
+//!
+//! // Filter codecs, enable/disable tracks, etc.
+//! if let HlsVideo::MainPlaylist(p) = &mut hls_video {
+//!     p.filter_codecs(&["aac"]);
+//! }
+//!
+//! // Generate playlist or segments.
+//! serve_http(hls_video.generate());
+//! ```
+//!
+//! If you are using an async server such as Axum, you should wrap `HlsVideo::new`
+//! and `hls_video.generate()` in calls to `tokio::task::spawn_blocking()`.
+//!
 pub(crate) mod error;
 pub(crate) mod ffmpeg_utils;
+pub(crate) mod hlsvideo;
 pub(crate) mod index;
 pub(crate) mod playlist;
 pub(crate) mod segment;
 pub(crate) mod subtitle;
 pub(crate) mod transcode;
 pub(crate) mod types;
-pub mod url;
+pub(crate) mod url;
 
 #[cfg(test)]
 pub(crate) mod tests;
@@ -39,5 +53,6 @@ pub(crate) mod tests;
 pub use error::{FfmpegError, HlsError, Result};
 pub use ffmpeg_utils::version_info as ffmpeg_version_info;
 pub use ffmpeg_utils::{init, install_log_filter};
+pub use hlsvideo::*;
 pub use types::*;
 pub use url::*;

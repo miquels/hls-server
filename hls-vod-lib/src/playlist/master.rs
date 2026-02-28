@@ -2,8 +2,12 @@
 //!
 //! Generates the master.m3u8 playlist that references all variant playlists.
 
-use super::codec::{build_codec_attribute, calculate_bandwidth};
+use std::collections::{HashMap, HashSet};
+
+use ffmpeg_next as ffmpeg;
+
 use crate::types::StreamIndex;
+use super::codec::*;
 
 /// Generate master playlist content
 ///
@@ -21,8 +25,10 @@ pub fn generate_master_playlist(
     index: &StreamIndex,
     video_url: &str,
     session_id: Option<&str>,
+    codecs: &[String],
+    tracks_enabled: &HashSet<usize>,
+    transcode: &HashMap<usize, String>,
     interleaved: bool,
-    force_aac: bool,
 ) -> String {
     let mut output = String::new();
 
@@ -31,52 +37,58 @@ pub fn generate_master_playlist(
     output.push_str("#EXT-X-VERSION:7\n");
     output.push('\n');
 
-    // Stream details collected directly from index
+    // Remove tracks that aren't enabled.
+    let orig_index = index;
+    let mut index = index.clone();
+    index.audio_streams.retain(|a| tracks_enabled.contains(&a.stream_index));
+    index.video_streams.retain(|v| tracks_enabled.contains(&v.stream_index));
+    index.subtitle_streams.retain(|s| tracks_enabled.contains(&s.stream_index));
 
-    // Convert 3-letter language code to 2-letter (RFC5646)
-    fn to_rfc5646(lang: &str) -> &str {
-        match lang {
-            "eng" => "en",
-            "fre" => "fr",
-            "ger" => "de",
-            "spa" => "es",
-            "ita" => "it",
-            "jpn" => "ja",
-            "kor" => "ko",
-            "chi" => "zh",
-            "rus" => "ru",
-            "por" => "pt",
-            _ => lang,
+    // Mark tracks to be transcoded (audio only for now).
+    for (idx, codec) in transcode.iter() {
+        if let Some(t) = index.get_audio_stream_mut(*idx) {
+            t.transcode_to = codec_id(codec);
+        }
+    }
+
+    // Filter out unsupported codecs.
+    let mut index = index.clone();
+    index.audio_streams.retain(|s| {
+        for codec in codecs {
+            if let Some(codec_id) = codec_id(codec) {
+                if s.codec_id == codec_id || s.transcode_to == Some(codec_id) {
+                    return true;
+                }
+            }
+        }
+        false
+    });
+    
+    // Now, if we have no audio streams left, but 'aac' was
+    // in the supported list, add transcoded streams.
+    if index.audio_streams.is_empty() && !orig_index.audio_streams.is_empty() {
+        let has_aac = codecs.iter().filter_map(|c| codec_id(c)).any(|id| id == ffmpeg::codec::Id::AAC);
+        if has_aac {
+            for s in &orig_index.audio_streams {
+                if s.codec_id == orig_index.audio_streams[0].codec_id {
+                    let mut s = s.clone();
+                    s.transcode_to = Some(ffmpeg::codec::Id::AAC);
+                    index.audio_streams.push(s);
+                }
+            }
         }
     }
 
     /// Return the codec-family GROUP-ID for a given stream.
-    /// All transcoded variants are placed in the "audio-aac" group.
-    fn group_id_for_stream(stream: &crate::types::AudioStreamInfo) -> &'static str {
-        if stream.is_transcoded {
-            return "audio-aac";
-        }
-
-        use ffmpeg_next::codec::Id;
-        match stream.codec_id {
-            Id::AAC => "audio-aac",
-            Id::AC3 => "audio-ac3",
-            Id::EAC3 => "audio-eac3",
-            Id::MP3 => "audio-mp3",
-            Id::OPUS => "audio-opus",
-            _ => "audio-aac",
-        }
+    fn group_id_for_stream(stream: &crate::types::AudioStreamInfo) -> String {
+        let codec = stream.transcode_to.unwrap_or(stream.codec_id);
+        format!("audio-{}", codec_name_short(codec, Some("aac")))
     }
 
     /// HLS codec string we advertise for a given group.
-    fn codec_str_for_group(group_id: &str) -> &'static str {
-        match group_id {
-            "audio-ac3" => "ac-3",
-            "audio-eac3" => "ec-3",
-            "audio-mp3" => "mp4a.40.34",
-            "audio-opus" => "Opus",
-            _ => "mp4a.40.2",
-        }
+    fn codec_str_for_group(group_id: &str) -> String {
+        let name = group_id.strip_prefix("audio-").unwrap();
+        codec_name_normalized(name).unwrap_or(name.to_string())
     }
 
     // Skip separate audio tracks section when using interleaved mode
@@ -92,36 +104,26 @@ pub fn generate_master_playlist(
         streams_sorted.sort_by(|a, b| {
             let ga = group_id_for_stream(a);
             let gb = group_id_for_stream(b);
-            ga.cmp(gb).then(a.stream_index.cmp(&b.stream_index))
+            ga.cmp(&gb).then(a.stream_index.cmp(&b.stream_index))
         });
 
         // Track which group_ids we've seen so we can mark the first of each as DEFAULT
-        let mut seen_groups: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        let mut seen_groups: std::collections::HashSet<String> = std::collections::HashSet::new();
 
         for variant in &streams_sorted {
             let group_id = group_id_for_stream(variant);
             let language = variant.language.as_deref().unwrap_or("und");
             let language_rfc = to_rfc5646(language);
-            let codec_label = if variant.is_transcoded {
-                "AAC (Transcoded)"
-            } else {
-                match variant.codec_id {
-                    ffmpeg_next::codec::Id::AAC => "AAC",
-                    ffmpeg_next::codec::Id::AC3 => "Dolby Digital",
-                    ffmpeg_next::codec::Id::EAC3 => "Dolby Digital Plus",
-                    ffmpeg_next::codec::Id::MP3 => "MP3",
-                    ffmpeg_next::codec::Id::OPUS => "Opus",
-                    _ => "Audio",
-                }
-            };
+            let codec = variant.transcode_to.unwrap_or(variant.codec_id);
+            let label = codec_label(codec);
 
             let name = if language == "und" {
-                codec_label.to_string()
+                label.to_string()
             } else {
-                format!("{} {}", language.to_uppercase(), codec_label)
+                format!("{} {}", language.to_uppercase(), label)
             };
 
-            let is_first_in_group = seen_groups.insert(group_id);
+            let is_first_in_group = seen_groups.insert(group_id.clone());
             let default = if is_first_in_group { "YES" } else { "NO" };
 
             let uri = crate::url::HlsUrl {
@@ -130,11 +132,7 @@ pub fn generate_master_playlist(
                 url_type: crate::url::UrlType::Playlist(crate::url::Playlist {
                     track_id: variant.stream_index,
                     audio_track_id: None,
-                    audio_transcode_to: if variant.is_transcoded {
-                        Some("aac".to_string())
-                    } else {
-                        None
-                    },
+                    audio_transcode_to: variant.transcode_to.map(|c| codec_name_short(c, None)),
                 }),
             };
 
@@ -188,12 +186,12 @@ pub fn generate_master_playlist(
         };
 
         // Collect distinct audio codec groups (preserving first-seen order)
-        let audio_groups: Vec<&'static str> = {
+        let audio_groups: Vec<String> = {
             let mut seen = std::collections::HashSet::new();
             let mut groups = Vec::new();
             for s in &index.audio_streams {
                 let g = group_id_for_stream(s);
-                if seen.insert(g) {
+                if seen.insert(g.clone()) {
                     groups.push(g);
                 }
             }
@@ -212,19 +210,9 @@ pub fn generate_master_playlist(
             let video_idx = video.stream_index;
             let audio_idx = audio.stream_index;
 
-            // Report AAC codec if transcoding, otherwise report source codec
-            let audio_codec_str = if force_aac {
-                "mp4a.40.2" // AAC codec for transcoded audio
-            } else {
-                match audio.codec_id {
-                    ffmpeg_next::codec::Id::AAC => "mp4a.40.2",
-                    ffmpeg_next::codec::Id::AC3 => "ac-3",
-                    ffmpeg_next::codec::Id::EAC3 => "ec-3",
-                    ffmpeg_next::codec::Id::MP3 => "mp4a.40.34",
-                    ffmpeg_next::codec::Id::OPUS => "Opus",
-                    _ => "mp4a.40.2",
-                }
-            };
+            // Get codec name.
+            let audio_codec = audio.transcode_to.unwrap_or(audio.codec_id);
+            let audio_codec_str = codec_name(audio_codec);
 
             let has_subs = !index.subtitle_streams.is_empty();
             let video_codec_str = build_codec_attribute(
@@ -263,11 +251,7 @@ pub fn generate_master_playlist(
                 url_type: crate::url::UrlType::Playlist(crate::url::Playlist {
                     track_id: video_idx,
                     audio_track_id: Some(audio_idx),
-                    audio_transcode_to: if force_aac {
-                        Some("aac".to_string())
-                    } else {
-                        None
-                    },
+                    audio_transcode_to: audio.transcode_to.map(|c| codec_name_short(c, None)),
                 }),
             };
 
