@@ -14,7 +14,6 @@ pub async fn handle_dynamic_request(
         std::collections::HashMap<String, String>,
     >,
 ) -> Result<axum::response::Response, HttpError> {
-
     // Decode the URL.
     let hls_url = hls_vod_lib::HlsParams::parse(&path).ok_or_else(|| {
         HttpError::SegmentNotFound(format!(
@@ -29,7 +28,6 @@ pub async fn handle_dynamic_request(
 
     // All code is sync, so spawn it in a separate thread.
     tokio::task::spawn_blocking(move || {
-
         if !media_path.exists() {
             return Err(HttpError::StreamNotFound(format!(
                 "Media file not found: {}",
@@ -37,7 +35,11 @@ pub async fn handle_dynamic_request(
             )));
         }
 
-        tracing::info!("Opening media: {:?} (stream_id: {:?})", media_path, hls_url.session_id);
+        tracing::info!(
+            "Opening media: {:?} (stream_id: {:?})",
+            media_path,
+            hls_url.session_id
+        );
         let mut hls_video = HlsVideo::open(&media_path, hls_url)
             .map_err(|e| HttpError::InternalError(format!("Failed to open media: {}", e)))?;
 
@@ -47,11 +49,24 @@ pub async fn handle_dynamic_request(
                 .map(|s| s.split(',').map(|c| c.trim().to_string()).collect())
                 .unwrap_or_default();
             p.filter_codecs(&codecs);
-            let interleave = query_params
+
+            let tracks: Vec<usize> = query_params
+                .get("tracks")
+                .map(|s| {
+                    s.split(',')
+                        .filter_map(|s| s.parse::<usize>().ok())
+                        .collect::<Vec<usize>>()
+                })
+                .unwrap_or_default();
+            if !tracks.is_empty() {
+                p.enable_tracks(&tracks);
+            }
+
+            if query_params
                 .get("interleave")
                 .map(|v| v == "true" || v == "1")
-                .unwrap_or(false);
-            if interleave {
+                .unwrap_or(false)
+            {
                 p.interleave();
             }
         }
@@ -62,7 +77,10 @@ pub async fn handle_dynamic_request(
             header::CONTENT_TYPE,
             HeaderValue::from_static(hls_video.mime_type()),
         );
-        headers.insert(header::CACHE_CONTROL, HeaderValue::from_static(hls_video.cache_control()));
+        headers.insert(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static(hls_video.cache_control()),
+        );
 
         let bytes = hls_video
             .generate()

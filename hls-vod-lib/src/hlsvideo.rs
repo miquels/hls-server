@@ -39,7 +39,7 @@ pub enum HlsVideo {
 impl HlsVideo {
     /// Create a HlsVideo from a video file and a url.
     pub fn open(video: &Path, hls_params: HlsParams) -> crate::error::Result<HlsVideo> {
-        let index = StreamIndex::open(video, None)?;
+        let index = StreamIndex::open(video, hls_params.session_id.clone())?;
         Ok(match &hls_params.url_type {
             UrlType::MainPlaylist => HlsVideo::MainPlaylist(MainPlaylist::new(hls_params, index)),
             _ => HlsVideo::PlaylistOrSegment(PlaylistOrSegment { hls_params, index }),
@@ -156,6 +156,11 @@ impl MainPlaylist {
     /// For now, we only look at audio and subtitles.
     pub fn filter_codecs(&mut self, codecs: &[impl AsRef<str>]) {
         self.codecs = codecs.iter().map(|c| c.as_ref().into()).collect();
+    }
+
+    /// Enable only the specified tracks.
+    pub fn enable_tracks(&mut self, tracks: &[usize]) {
+        self.tracks = tracks.iter().cloned().collect();
     }
 }
 
