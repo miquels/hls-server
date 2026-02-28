@@ -1,9 +1,11 @@
+//! HLS parameters, derived from the URL.
+
 use std::fmt;
 use std::str::FromStr;
 
-/// HlsUrl contains a video playlist or segment decoded from a URL.
+/// HlsParams contains a video playlist or segment decoded from a URL.
 #[derive(Debug)]
-pub struct HlsUrl {
+pub struct HlsParams {
     /// Enum of subtype.
     pub url_type: UrlType,
     /// Optional session id. Is only None for the MainPlaylist.
@@ -40,7 +42,7 @@ fn usize_from_str(s: &str) -> usize {
     usize::from_str(s).expect("a number")
 }
 
-impl fmt::Display for HlsUrl {
+impl fmt::Display for HlsParams {
     /// Generate the encoded url, relative to the playlist it's in.
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match &self.url_type {
@@ -62,12 +64,12 @@ impl fmt::Display for HlsUrl {
     }
 }
 
-impl HlsUrl {
+impl HlsParams {
     /// Parse a HLS URL.
-    pub fn parse(url: &str) -> Option<HlsUrl> {
+    pub fn parse(url: &str) -> Option<HlsParams> {
         // Check for video.mp4.as.m3u8.
         if let Some(caps) = regex!(r"^(.+\.(?:mp4|mkv|webm))\.as\.m3u8$").captures(url) {
-            return Some(HlsUrl {
+            return Some(HlsParams {
                 url_type: UrlType::MainPlaylist,
                 session_id: None,
                 video_url: caps[1].to_string(),
@@ -85,7 +87,7 @@ impl HlsUrl {
         // t.<track_id>+<audio_track_id>.m3u8
         // t.<track_id>+<audio_track_id>-<codec>.m3u8
         if let Some(caps) = regex!(r"^t.(\d+)(?:\+(\d+))?(?:-(.+))?.(m3u8)").captures(rest) {
-            return Some(HlsUrl {
+            return Some(HlsParams {
                 url_type: UrlType::Playlist(Playlist {
                     track_id: usize_from_str(&caps[1]),
                     audio_track_id: caps.get(2).map(|m| usize_from_str(m.as_str())),
@@ -111,7 +113,7 @@ impl HlsUrl {
             {
                 return None;
             }
-            return Some(HlsUrl {
+            return Some(HlsParams {
                 url_type: UrlType::AudioSegment(AudioSegment {
                     track_id: usize_from_str(&caps[1]),
                     transcode_to: caps.get(2).map(|m| m.as_str().to_string()),
@@ -139,7 +141,7 @@ impl HlsUrl {
             {
                 return None;
             }
-            return Some(HlsUrl {
+            return Some(HlsParams {
                 url_type: UrlType::VideoSegment(VideoSegment {
                     track_id: usize_from_str(&caps[1]),
                     audio_track_id: caps.get(2).map(|m| usize_from_str(m.as_str())),
@@ -156,7 +158,7 @@ impl HlsUrl {
         // Subtitle URL.
         // s/<track_id>.<start_cue>.<end_cue>.vtt
         if let Some(caps) = regex!(r"^s/(\d+)\.(\d+)-(\d+)\.vtt$").captures(rest) {
-            return Some(HlsUrl {
+            return Some(HlsParams {
                 url_type: UrlType::VttSegment(VttSegment {
                     track_id: usize_from_str(&caps[1]),
                     start_cue: usize_from_str(&caps[2]),
@@ -170,7 +172,7 @@ impl HlsUrl {
         None
     }
 
-    /// Encode the HlsUrl to a string.
+    /// Encode the HlsParams to a string.
     pub fn encode_url(&self) -> String {
         self.to_string()
     }
@@ -237,6 +239,7 @@ impl fmt::Display for VideoSegment {
     }
 }
 
+/// An audio segment.
 #[derive(Debug)]
 pub struct AudioSegment {
     /// Track id.
@@ -262,6 +265,7 @@ impl fmt::Display for AudioSegment {
     }
 }
 
+/// A vtt (subtitle) segment.
 #[derive(Debug)]
 pub struct VttSegment {
     /// Track id.
@@ -272,6 +276,7 @@ pub struct VttSegment {
     pub end_cue: usize,
 }
 
+/// A vtt segment (subtitles).
 impl fmt::Display for VttSegment {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(
@@ -282,6 +287,7 @@ impl fmt::Display for VttSegment {
     }
 }
 
+/// An audio / video / subtitle playlist.
 #[derive(Debug)]
 pub struct Playlist {
     /// Track id.

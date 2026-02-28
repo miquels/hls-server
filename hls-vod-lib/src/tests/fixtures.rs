@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicI64, AtomicU64};
 // use std::sync::Arc; // Commented out as per instruction
 // use MediaInfo; // Commented out as per instruction
 // use crate::ffmpeg_utils::ffmpeg::Rational; // Commented out as per instruction
-use crate::types::{
+use crate::media::{
     AudioStreamInfo, SegmentInfo, StreamIndex, SubtitleFormat, SubtitleStreamInfo, VideoStreamInfo,
 };
 
@@ -221,10 +221,10 @@ impl TestMediaInfo {
         index
     }
 
-    pub fn create_mock_media(&self) -> crate::types::StreamIndex {
+    pub fn create_mock_media(&self) -> crate::media::StreamIndex {
         let index = self.create_mock_index();
 
-        crate::types::register_test_stream(std::sync::Arc::new(index.clone()));
+        crate::media::register_test_stream(std::sync::Arc::new(index.clone()));
         index
     }
 }

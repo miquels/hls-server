@@ -1,26 +1,29 @@
-//! LRU Segment Cache and Deduplication
+//! Caching and state.
 //!
-//! Implements a least-recently-used cache for HLS segments
-//! with memory limit enforcement, and deduplicates concurrent
-//! segment requests.
+//! We keep two persistent caches:
+//! - all currently open streams
+//! - a stream segment cache (optional).
+
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::OnceLock;
+use std::time::SystemTime;
 
 use bytes::Bytes;
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::OnceLock;
-use std::time::SystemTime;
+
+use crate::media::StreamIndex;
 
 static CACHE: OnceLock<SegmentCache> = OnceLock::new();
 
 /// Initialize the global segment cache.
 /// This function should be called once at application startup.
-pub fn init_cache(config: SegmentCacheConfig) {
+pub fn init_segment_cache(config: SegmentCacheConfig) {
     let _ = CACHE.set(SegmentCache::new(config));
 }
 
 /// Retrieve the global cache stats
-pub fn cache_stats() -> SegmentCacheStats {
+pub fn segment_cache_stats() -> SegmentCacheStats {
     if let Some(c) = CACHE.get() {
         c.stats()
     } else {
@@ -34,7 +37,7 @@ pub fn cache_stats() -> SegmentCacheStats {
 }
 
 /// Access the global cache internal instance
-pub(crate) fn get() -> Option<&'static SegmentCache> {
+pub(crate) fn segment_cache() -> Option<&'static SegmentCache> {
     CACHE.get()
 }
 
@@ -70,7 +73,7 @@ impl SegmentCacheConfig {
 
 /// Cache entry with metadata
 #[derive(Debug, Clone)]
-pub struct CacheEntry {
+pub(crate) struct CacheEntry {
     pub data: Bytes,
     pub created_at: SystemTime,
     pub last_accessed: SystemTime,
@@ -103,7 +106,7 @@ impl CacheEntry {
 }
 
 /// LRU cache for HLS segments
-pub struct SegmentCache {
+pub(crate) struct SegmentCache {
     /// Cache entries (key -> entry)
     entries: DashMap<String, CacheEntry>,
     /// Current memory usage in bytes
@@ -270,6 +273,71 @@ impl Default for SegmentCache {
     }
 }
 
+pub(crate) static STREAMS_BY_ID: std::sync::OnceLock<dashmap::DashMap<String, std::sync::Arc<StreamIndex>>> =
+    std::sync::OnceLock::new();
+
+/// Retrieve a tracked media stream by its generated stream ID
+pub(crate) fn get_stream_by_id(stream_id: &str) -> Option<std::sync::Arc<StreamIndex>> {
+    STREAMS_BY_ID
+        .get_or_init(dashmap::DashMap::new)
+        .get(stream_id)
+        .map(|r| r.value().clone())
+}
+
+/// Remove a tracked media stream by its generated stream ID
+pub fn remove_stream_by_id(stream_id: &str) {
+    if let Some(_media) = STREAMS_BY_ID
+        .get_or_init(dashmap::DashMap::new)
+        .remove(stream_id)
+    {
+        if let Some(c) = crate::cache::segment_cache() {
+            c.remove_stream(stream_id);
+        }
+    }
+}
+
+/// Active stream metadata
+#[derive(serde::Serialize, Clone, Debug)]
+pub struct ActiveStreamInfo {
+    pub stream_id: String,
+    pub path: String,
+    pub duration: f64,
+}
+
+/// Fetch a list of active streams
+pub fn active_streams() -> Vec<ActiveStreamInfo> {
+    STREAMS_BY_ID
+        .get_or_init(dashmap::DashMap::new)
+        .iter()
+        .map(|r| ActiveStreamInfo {
+            stream_id: r.value().stream_id.clone(),
+            path: r.value().source_path.to_string_lossy().to_string(),
+            duration: r.value().duration_secs,
+        })
+        .collect()
+}
+
+/// Remove expired streams from tracking and cache
+pub fn cleanup_expired_streams() -> usize {
+    const STREAM_TIMEOUT_SECS: u64 = 600; // 10 minutes
+
+    let mut streams_to_remove = Vec::new();
+
+    for entry in STREAMS_BY_ID.get_or_init(dashmap::DashMap::new).iter() {
+        if entry.value().time_since_last_access() > STREAM_TIMEOUT_SECS {
+            streams_to_remove.push(entry.key().clone());
+        }
+    }
+
+    let mut count = 0;
+    for stream_id in streams_to_remove {
+        remove_stream_by_id(&stream_id);
+        count += 1;
+    }
+
+    count
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -361,3 +429,4 @@ mod tests {
         assert_eq!(cache.len(), 1);
     }
 }
+

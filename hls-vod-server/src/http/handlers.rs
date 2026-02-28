@@ -71,7 +71,7 @@ pub async fn cache_stats(State(state): State<Arc<AppState>>) -> Json<serde_json:
 /// Debug endpoint: active streams
 pub async fn active_streams(
     State(_state): State<Arc<AppState>>,
-) -> Json<Vec<hls_vod_lib::ActiveStreamInfo>> {
-    let streams = hls_vod_lib::active_streams();
+) -> Json<Vec<hls_vod_lib::cache::ActiveStreamInfo>> {
+    let streams = hls_vod_lib::cache::active_streams();
     Json(streams)
 }

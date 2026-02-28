@@ -1,7 +1,7 @@
 //! Video stream analysis
 
 use crate::error::Result;
-use crate::types::VideoStreamInfo;
+use crate::media::VideoStreamInfo;
 use ffmpeg_next as ffmpeg;
 
 /// Analyze a video stream and extract metadata

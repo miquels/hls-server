@@ -196,16 +196,16 @@ pub fn codec_name(codec_id: ffmpeg::codec::Id) -> String {
     }
 }
 
-pub fn codec_name_short(codec_id: ffmpeg::codec::Id, fallback: Option<&str>) -> String {
+pub fn codec_name_short(codec_id: ffmpeg::codec::Id) -> Option<&'static str> {
     match codec_id {
-        ffmpeg::codec::Id::AAC => "aac".to_string(),
-        ffmpeg::codec::Id::AC3 => "ac3".to_string(),
-        ffmpeg::codec::Id::EAC3 => "ec3".to_string(),
-        ffmpeg::codec::Id::FLAC => "flac".to_string(),
-        ffmpeg::codec::Id::MP3 => "mp3".to_string(),
-        ffmpeg::codec::Id::OPUS => "opus".to_string(),
-        ffmpeg::codec::Id::VORBIS => "vorbis".to_string(),
-        _ => fallback.map(|s| s.to_string()).unwrap_or_else(|| format!("{:?}", codec_id).to_lowercase()),
+        ffmpeg::codec::Id::AAC => Some("aac"),
+        ffmpeg::codec::Id::AC3 => Some("ac3"),
+        ffmpeg::codec::Id::EAC3 => Some("ec3"),
+        ffmpeg::codec::Id::FLAC => Some("flac"),
+        ffmpeg::codec::Id::MP3 => Some("mp3"),
+        ffmpeg::codec::Id::OPUS => Some("opus"),
+        ffmpeg::codec::Id::VORBIS => Some("vorbis"),
+        _ => None,
     }
 }
 

@@ -3,10 +3,19 @@
 use bytes::Bytes;
 use std::path::Path;
 
-use crate::error::{HlsError, Result};
-use crate::segment::muxer::Fmp4Muxer;
-use crate::types::{SegmentInfo, StreamIndex};
 use ffmpeg_next::{self as ffmpeg, Rescale};
+
+use crate::error::{HlsError, Result};
+use crate::media::{SegmentInfo, StreamIndex};
+use crate::segment::muxer::Fmp4Muxer;
+use crate::segment::muxer::find_media_segment_offset;
+use crate::segment::muxer::mux_aac_packets_to_fmp4;
+use crate::subtitle::decoder::is_bitmap_subtitle_codec;
+use crate::subtitle::extractor::SubtitleExtractor;
+use crate::subtitle::webvtt::{WebVttConfig, WebVttWriter};
+use crate::transcode::encoder::{get_recommended_bitrate, AacEncoder};
+use crate::transcode::pipeline::transcode_audio_segment;
+use crate::transcode::resampler::HLS_SAMPLE_RATE;
 
 /// Generate an initialization segment (init.mp4)
 #[allow(dead_code)] // we'll need this when we support multiplexed tracks
@@ -87,31 +96,22 @@ pub(crate) fn generate_video_init_segment(index: &StreamIndex) -> Result<Bytes> 
 pub(crate) fn generate_audio_init_segment(
     index: &StreamIndex,
     track_index: usize,
-    force_aac: bool,
 ) -> Result<Bytes> {
-    use crate::transcode::encoder::{get_recommended_bitrate, AacEncoder};
-    use crate::transcode::pipeline::needs_transcoding;
-    use crate::transcode::resampler::HLS_SAMPLE_RATE;
 
     // Check if this audio track needs transcoding
-    let audio_info = index
-        .audio_streams
-        .iter()
-        .find(|a| a.stream_index == track_index);
+    // TODO: add support for more codecs.
+    let audio_info = index.get_audio_stream(track_index)?;
+    if audio_info.transcode_to == Some(ffmpeg::codec::Id::AAC) {
+        // Build an init segment with AAC codec parameters
+        let bitrate = get_recommended_bitrate(audio_info.channels);
+        let encoder = AacEncoder::open(HLS_SAMPLE_RATE, 2, bitrate)?;
 
-    if let Some(info) = audio_info {
-        if force_aac || needs_transcoding(info) {
-            // Build an init segment with AAC codec parameters
-            let bitrate = get_recommended_bitrate(info.channels);
-            let encoder = AacEncoder::open(HLS_SAMPLE_RATE, 2, bitrate)?;
+        let mut muxer = Fmp4Muxer::new()?;
+        muxer.add_audio_stream(&encoder.codec_parameters(), track_index)?;
 
-            let mut muxer = Fmp4Muxer::new()?;
-            muxer.add_audio_stream(&encoder.codec_parameters(), track_index)?;
-
-            let mut data = muxer.write_header(false)?;
-            fix_trex_durations(&mut data, 1024);
-            return Ok(Bytes::from(data));
-        }
+        let mut data = muxer.write_header(false)?;
+        fix_trex_durations(&mut data, 1024);
+        return Ok(Bytes::from(data));
     }
 
     // Source is already Native (AAC, AC3, Opus) — copy parameters directly
@@ -167,10 +167,7 @@ pub(crate) fn generate_interleaved_init_segment(
     index: &StreamIndex,
     video_idx: usize,
     audio_idx: usize,
-    force_aac: bool,
 ) -> Result<Bytes> {
-    use crate::transcode::encoder::{get_recommended_bitrate, AacEncoder};
-    use crate::transcode::resampler::HLS_SAMPLE_RATE;
 
     if index.video_streams.is_empty() || index.audio_streams.is_empty() {
         return Err(HlsError::StreamNotFound(
@@ -178,8 +175,11 @@ pub(crate) fn generate_interleaved_init_segment(
         ));
     }
 
-    // Only transcode if explicitly requested via force_aac parameter
-    let needs_transcode = force_aac;
+    // Only transcode if explicitly requested.
+    let needs_transcode = index
+        .get_audio_stream(audio_idx)
+        .map(|t| t.transcode_to == Some(ffmpeg::codec::Id::AAC))
+        .unwrap_or(false);
 
     let input = index.get_context()?;
     let mut muxer = Fmp4Muxer::new()?;
@@ -200,10 +200,7 @@ pub(crate) fn generate_interleaved_init_segment(
         } else if crate::ffmpeg_utils::utils::is_audio_codec(codec_id) && idx == audio_idx {
             if needs_transcode {
                 // Use AAC encoder parameters instead of source
-                let audio_info = index
-                    .audio_streams
-                    .iter()
-                    .find(|a| a.stream_index == audio_idx);
+                let audio_info = index.get_audio_stream(audio_idx);
                 let bitrate = get_recommended_bitrate(audio_info.map(|a| a.channels).unwrap_or(2));
                 let encoder = AacEncoder::open(HLS_SAMPLE_RATE, 2, bitrate)?;
                 muxer.add_audio_stream(&encoder.codec_parameters(), idx)?;
@@ -244,7 +241,6 @@ pub(crate) fn generate_interleaved_segment(
     audio_idx: usize,
     segment: &SegmentInfo,
     _source_path: &Path,
-    force_aac: bool,
 ) -> Result<Bytes> {
     if index.video_streams.is_empty() || index.audio_streams.is_empty() {
         return Err(HlsError::StreamNotFound(
@@ -252,15 +248,11 @@ pub(crate) fn generate_interleaved_segment(
         ));
     }
 
-    // Only transcode if explicitly requested via force_aac parameter
-    let needs_transcode = force_aac;
-
     generate_media_segment_ffmpeg(
         segment,
         "av",
         Some(video_idx),
         Some(audio_idx),
-        needs_transcode,
         index,
     )
 }
@@ -339,7 +331,7 @@ pub(crate) fn generate_video_segment(
     _source_path: &Path,
 ) -> Result<Bytes> {
     let segment = index.get_segment("video", sequence)?;
-    generate_media_segment_ffmpeg(segment, "video", Some(track_index), None, false, index)
+    generate_media_segment_ffmpeg(segment, "video", Some(track_index), None, index)
 }
 
 /// Generate an audio segment
@@ -351,43 +343,26 @@ pub(crate) fn generate_audio_segment(
     track_index: usize,
     sequence: usize,
     _source_path: &Path,
-    force_aac: bool,
 ) -> Result<Bytes> {
-    use crate::transcode::pipeline::needs_transcoding;
 
     let segment = index.get_segment("audio", sequence)?;
 
     // Check if this track needs transcoding
-    let needs_transcode = index
-        .audio_streams
-        .iter()
-        .find(|a| a.stream_index == track_index)
-        .map(needs_transcoding)
-        .unwrap_or(false);
-
-    if force_aac || needs_transcode {
-        let audio_info = index
-            .audio_streams
-            .iter()
-            .find(|a| a.stream_index == track_index)
-            .ok_or_else(|| {
-                HlsError::StreamNotFound(format!("audio stream {} not found", track_index))
-            })?;
-
+    // TODO: support more codecs than aac.
+    let audio_info = index.get_audio_stream(track_index)?;
+    if audio_info.transcode_to == Some(ffmpeg::codec::Id::AAC) {
         generate_transcoded_audio_segment(index, audio_info, segment)
     } else {
-        generate_media_segment_ffmpeg(segment, "audio", None, Some(track_index), false, index)
+        generate_media_segment_ffmpeg(segment, "audio", None, Some(track_index), index)
     }
 }
 
 /// Generate an audio segment by transcoding (decode → resample → AAC encode → fMP4 mux)
 fn generate_transcoded_audio_segment(
     index: &StreamIndex,
-    audio_info: &crate::types::AudioStreamInfo,
+    audio_info: &crate::media::AudioStreamInfo,
     segment: &SegmentInfo,
 ) -> Result<Bytes> {
-    use crate::transcode::pipeline::transcode_audio_segment;
-    use crate::transcode::resampler::HLS_SAMPLE_RATE;
 
     // Use the video timebase stored at index time — no need to re-open the file.
     let video_timebase = index.video_timebase;
@@ -413,15 +388,12 @@ fn generate_transcoded_audio_segment(
     // Mux the AAC packets into an fMP4 segment using frag_every_frame so each
     // write_packet call emits a moof+mdat immediately (audio-only has no video
     // keyframes to trigger fragmentation, so frag_keyframe doesn't work here).
-    use crate::segment::muxer::mux_aac_packets_to_fmp4;
-    use crate::transcode::encoder::{get_recommended_bitrate, AacEncoder};
     let bitrate = get_recommended_bitrate(audio_info.channels);
     let encoder = AacEncoder::open(HLS_SAMPLE_RATE, 2, bitrate)?;
 
     let full_data = mux_aac_packets_to_fmp4(&encoder.codec_parameters(), aac_packets)?;
 
     // Strip the init segment, return only the media segment
-    use crate::segment::muxer::find_media_segment_offset;
     let media_offset = find_media_segment_offset(&full_data).ok_or_else(|| {
         HlsError::Muxing("Transcoded audio: no media segment found (moof/styp missing)".to_string())
     })?;
@@ -466,37 +438,11 @@ pub(crate) fn generate_subtitle_segment(
     end_sequence: usize,
     _source_path: &Path,
 ) -> Result<Bytes> {
-    use crate::subtitle::decoder::is_bitmap_subtitle_codec;
-    use crate::subtitle::extractor::SubtitleExtractor;
-    use crate::subtitle::webvtt::{WebVttConfig, WebVttWriter};
 
-    let start_segment = index
-        .segments
-        .iter()
-        .find(|s| s.sequence == start_sequence)
-        .ok_or_else(|| HlsError::SegmentNotFound {
-            stream_id: index.stream_id.clone(),
-            segment_type: "subtitle".to_string(),
-            sequence: start_sequence,
-        })?;
+    let start_segment = index.get_segment("subtitle", start_sequence)?;
+    let end_segment = index.get_segment("subtitle", end_sequence)?;
 
-    let end_segment = index
-        .segments
-        .iter()
-        .find(|s| s.sequence == end_sequence)
-        .ok_or_else(|| HlsError::SegmentNotFound {
-            stream_id: index.stream_id.clone(),
-            segment_type: "subtitle".to_string(),
-            sequence: end_sequence,
-        })?;
-
-    let sub_info = index
-        .subtitle_streams
-        .iter()
-        .find(|s| s.stream_index == track_index)
-        .ok_or_else(|| {
-            HlsError::StreamNotFound(format!("subtitle stream {} not found", track_index))
-        })?;
+    let sub_info = index.get_subtitle_stream(track_index)?;
 
     if is_bitmap_subtitle_codec(sub_info.codec_id) {
         return Err(HlsError::Muxing(format!(
@@ -766,11 +712,8 @@ fn generate_media_segment_ffmpeg(
     segment_type: &str,
     video_track_index: Option<usize>,
     audio_track_index: Option<usize>,
-    audio_needs_transcoding: bool,
     index: &StreamIndex,
 ) -> Result<Bytes> {
-    use crate::transcode::encoder::{get_recommended_bitrate, AacEncoder};
-    use crate::transcode::resampler::HLS_SAMPLE_RATE;
 
     // For interleaved segments, we need to mux both audio and video
     let is_interleaved = segment_type == "av";
@@ -799,14 +742,13 @@ fn generate_media_segment_ffmpeg(
             }
             if let Some(audio_idx) = audio_track_index {
                 if idx == audio_idx && crate::ffmpeg_utils::utils::is_audio_codec(codec_id) {
-                    if audio_needs_transcoding {
+                    let audio_info = index.get_audio_stream(audio_idx)?;
+                    // TODO: support more codecs than AAC
+                    if audio_info.transcode_to == Some(ffmpeg::codec::Id::AAC) {
                         // Use AAC encoder parameters for transcoded audio
-                        let audio_info = index
-                            .audio_streams
-                            .iter()
-                            .find(|a| a.stream_index == audio_idx);
                         let bitrate =
-                            get_recommended_bitrate(audio_info.map(|a| a.channels).unwrap_or(2));
+                            get_recommended_bitrate(audio_info.channels);
+                        // FIXME: should '2' here be 'audio_info.channels' ?
                         let encoder = AacEncoder::open(HLS_SAMPLE_RATE, 2, bitrate)?;
                         muxer.add_audio_stream(&encoder.codec_parameters(), idx)?;
                     } else {
@@ -1086,8 +1028,6 @@ fn generate_media_segment_ffmpeg(
 
     // Use robust offset detection to find start of media segment
     // This handles cases where init segment size might change due to seeking/writing
-    use crate::segment::muxer::find_media_segment_offset;
-
     let media_offset = find_media_segment_offset(&full_data).ok_or_else(|| {
         HlsError::Muxing("No media segment data found (moof/styp missing)".to_string())
     })?;
@@ -1268,7 +1208,7 @@ fn generate_media_segment_ffmpeg(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::StreamIndex;
+    use crate::media::StreamIndex;
 
     #[test]
     fn test_generate_video_segment_integration() {
@@ -1288,7 +1228,7 @@ mod tests {
         let mut index = StreamIndex::new(path.clone());
 
         // Mock a segment (first 4 seconds)
-        let segment = crate::types::SegmentInfo {
+        let segment = crate::media::SegmentInfo {
             sequence: 0,
             start_pts: 0,
             end_pts: 360000, // 4 seconds * 90000
@@ -1329,7 +1269,7 @@ mod tests {
 
         let mut index = StreamIndex::new(path.clone());
         // Sequence 1 starts at 4.0s (360000 pts)
-        let segment = crate::types::SegmentInfo {
+        let segment = crate::media::SegmentInfo {
             sequence: 1,
             start_pts: 360000,
             end_pts: 720000,
@@ -1354,7 +1294,7 @@ mod tests {
 
     #[test]
     fn test_generate_video_init_segment_trex() {
-        use crate::types::VideoStreamInfo;
+        use crate::media::VideoStreamInfo;
 
         // Initialize FFmpeg
         let _ = ffmpeg::init();
@@ -1376,13 +1316,13 @@ mod tests {
             stream_id: "test_stream".to_string(),
             source_path: source_path.clone(),
             duration_secs: 5.0,
-            video_timebase: ffmpeg_next::Rational(1, 12800),
+            video_timebase: ffmpeg::Rational(1, 12800),
             video_streams: vec![VideoStreamInfo {
                 stream_index: 0,
                 width: 640,
                 height: 360,
-                framerate: ffmpeg_next::Rational(25, 1),
-                codec_id: ffmpeg_next::codec::Id::H264,
+                framerate: ffmpeg::Rational(25, 1),
+                codec_id: ffmpeg::codec::Id::H264,
                 bitrate: 500000,
                 language: None,
                 profile: None,
@@ -1461,9 +1401,9 @@ mod tests {
         let mut index = StreamIndex::new(source_path.clone());
 
         // Add an audio stream info
-        index.audio_streams.push(crate::types::AudioStreamInfo {
+        index.audio_streams.push(crate::media::AudioStreamInfo {
             stream_index: 1, // In bun33s.mp4, index 1 is audio
-            codec_id: ffmpeg_next::codec::Id::AAC,
+            codec_id: ffmpeg::codec::Id::AAC,
             sample_rate: 48000,
             channels: 2,
             bitrate: 128000,
@@ -1474,7 +1414,7 @@ mod tests {
         });
 
         // Mock a segment (first 4 seconds)
-        let segment = crate::types::SegmentInfo {
+        let segment = crate::media::SegmentInfo {
             sequence: 0,
             start_pts: 0,
             end_pts: 360000, // 4 seconds * 90000
@@ -1485,7 +1425,7 @@ mod tests {
         index.segments.push(segment);
 
         // Call generate_audio_segment
-        let result = generate_audio_segment(&index, 1, 0, &source_path, false);
+        let result = generate_audio_segment(&index, 1, 0, &source_path);
 
         match result {
             Ok(bytes) => {
@@ -1520,9 +1460,9 @@ mod tests {
         let mut index = StreamIndex::new(source_path.clone());
 
         // Add an audio stream info with specific sample rate
-        index.audio_streams.push(crate::types::AudioStreamInfo {
+        index.audio_streams.push(crate::media::AudioStreamInfo {
             stream_index: 1,
-            codec_id: ffmpeg_next::codec::Id::AAC,
+            codec_id: ffmpeg::codec::Id::AAC,
             sample_rate: 44100, // Match bun33s.mp4
             channels: 2,
             bitrate: 128000,

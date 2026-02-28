@@ -1,6 +1,6 @@
 //! Subtitle stream analysis
 
-use crate::types::{SubtitleFormat, SubtitleStreamInfo};
+use crate::media::{SubtitleFormat, SubtitleStreamInfo};
 use ffmpeg_next as ffmpeg;
 
 /// Analyze a subtitle stream and extract metadata

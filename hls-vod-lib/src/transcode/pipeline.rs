@@ -9,7 +9,7 @@
 use ffmpeg_next as ffmpeg;
 
 use crate::error::{HlsError, Result};
-use crate::types::{AudioStreamInfo, SegmentInfo};
+use crate::media::{AudioStreamInfo, SegmentInfo};
 
 use super::decoder::AudioDecoder;
 use super::encoder::{get_recommended_bitrate, AacEncoder};
@@ -363,7 +363,7 @@ pub fn get_transcode_requirements(audio_stream: &AudioStreamInfo) -> TranscodeRe
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::AudioStreamInfo;
+    use crate::media::AudioStreamInfo;
 
     fn make_audio_stream(codec: ffmpeg::codec::Id) -> AudioStreamInfo {
         AudioStreamInfo {

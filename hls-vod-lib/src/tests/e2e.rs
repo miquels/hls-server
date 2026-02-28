@@ -5,25 +5,25 @@ use crate::tests::validation::{
     validate_master_playlist, validate_variant_playlist, validate_webvtt, PlaylistType,
     ValidationResult,
 };
-use crate::types::StreamIndex;
-use crate::url::HlsUrl;
+use crate::media::StreamIndex;
+use crate::hlsvideo::HlsParams;
 
 fn get_master(media: &StreamIndex, session: Option<&str>) -> String {
     let url = format!("{}.as.m3u8", media.source_path.to_string_lossy());
-    let hls_url = HlsUrl::parse(&url).expect("Should parse master URL");
+    let hls_params = HlsParams::parse(&url).expect("Should parse master URL");
     if let Some(session) = session {
-        let mut h = hls_url;
+        let mut h = hls_params;
         h.session_id = Some(session.to_string());
         String::from_utf8(h.generate(media, false, false).unwrap()).unwrap()
     } else {
-        String::from_utf8(hls_url.generate(media, false, false).unwrap()).unwrap()
+        String::from_utf8(hls_params.generate(media, false, false).unwrap()).unwrap()
     }
 }
 
 fn get_variant(media: &StreamIndex, path: &str) -> String {
     let url = format!("{}/none/{}", media.source_path.to_string_lossy(), path);
-    let hls_url = HlsUrl::parse(&url).unwrap();
-    String::from_utf8(hls_url.generate(media, false, false).unwrap()).unwrap()
+    let hls_params = HlsParams::parse(&url).unwrap();
+    String::from_utf8(hls_params.generate(media, false, false).unwrap()).unwrap()
 }
 
 fn get_segment(media: &StreamIndex, path: &str) -> Vec<u8> {
@@ -32,8 +32,8 @@ fn get_segment(media: &StreamIndex, path: &str) -> Vec<u8> {
 
 fn try_get_segment(media: &StreamIndex, path: &str) -> Result<Vec<u8>, crate::error::HlsError> {
     let url = format!("{}/none/{}", media.source_path.to_string_lossy(), path);
-    let hls_url = HlsUrl::parse(&url).unwrap();
-    hls_url.generate(media, false, false)
+    let hls_params = HlsParams::parse(&url).unwrap();
+    hls_params.generate(media, false, false)
 }
 
 /// Test the complete stream lifecycle

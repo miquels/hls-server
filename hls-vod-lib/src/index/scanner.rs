@@ -12,7 +12,7 @@ use ffmpeg_next as ffmpeg;
 
 use crate::error::{FfmpegError, HlsError, Result};
 use crate::ffmpeg_utils::index::read_index_entries;
-use crate::types::{SegmentInfo, StreamIndex, SubtitleSampleRef};
+use crate::media::{SegmentInfo, StreamIndex, SubtitleSampleRef};
 
 use super::{analyze_audio_stream, analyze_subtitle_stream, analyze_video_stream};
 

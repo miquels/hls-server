@@ -1,9 +1,11 @@
+//! Playlist and segment generation.
+
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
-use crate::types::StreamIndex;
-use crate::url::{HlsUrl, UrlType};
+use crate::media::StreamIndex;
+use crate::params::{HlsParams, UrlType};
 
 /// Playlist or segment generation.
 ///
@@ -20,7 +22,7 @@ use crate::url::{HlsUrl, UrlType};
 /// You would use this like:
 ///
 /// ```
-/// let mut video = HlsVideo::new(video_path, hls_url)?;
+/// let mut video = HlsVideo::open(video_path, hls_params)?;
 /// if let HslVideo::MainPlaylist(p) = &mut video {
 ///     p.filter_codecs(["aac"]);
 /// }
@@ -34,19 +36,19 @@ pub enum HlsVideo {
 
 impl HlsVideo {
     /// Create a HlsVideo from a video file and a url.
-    pub fn new(video: &Path, hls_url: HlsUrl) -> crate::error::Result<HlsVideo> {
+    pub fn open(video: &Path, hls_params: HlsParams) -> crate::error::Result<HlsVideo> {
         let index = StreamIndex::open(video, None)?;
-        Ok(match &hls_url.url_type {
-            UrlType::MainPlaylist => HlsVideo::MainPlaylist(MainPlaylist::new(hls_url, index)),
+        Ok(match &hls_params.url_type {
+            UrlType::MainPlaylist => HlsVideo::MainPlaylist(MainPlaylist::new(hls_params, index)),
             _ => HlsVideo::PlaylistOrSegment(PlaylistOrSegment {
-                hls_url,
+                hls_params,
                 index,
             }),
         })
     }
 
     /// Generate playlist or segment.
-    pub fn generate(&self) -> crate::error::Result<Vec<u8>> {
+    pub fn generate(self) -> crate::error::Result<Vec<u8>> {
         match self {
             HlsVideo::MainPlaylist(p) => p.generate(),
             HlsVideo::PlaylistOrSegment(p) => p.generate(),
@@ -55,14 +57,14 @@ impl HlsVideo {
 
     pub fn mime_type(&self) -> &'static str {
         match self {
-            HlsVideo::MainPlaylist(p) => p.hls_url.mime_type(),
-            HlsVideo::PlaylistOrSegment(s) => s.hls_url.mime_type(),
+            HlsVideo::MainPlaylist(p) => p.hls_params.mime_type(),
+            HlsVideo::PlaylistOrSegment(s) => s.hls_params.mime_type(),
         }
     }
     pub fn cache_control(&self) -> &'static str {
         match self {
-            HlsVideo::MainPlaylist(p) => p.hls_url.cache_control(),
-            HlsVideo::PlaylistOrSegment(s) => s.hls_url.cache_control(),
+            HlsVideo::MainPlaylist(p) => p.hls_params.cache_control(),
+            HlsVideo::PlaylistOrSegment(s) => s.hls_params.cache_control(),
         }
     }
 }
@@ -72,7 +74,7 @@ impl HlsVideo {
 /// Here you can enable/disable tracks, filter on codecs, set audio/video
 /// interleaving just before generating the main playlist.
 pub struct MainPlaylist {
-    pub hls_url:    HlsUrl,
+    pub hls_params:    HlsParams,
     pub index:      Arc<StreamIndex>,
     pub tracks:     HashSet<usize>,
     pub codecs:     Vec<String>,
@@ -84,12 +86,12 @@ pub struct MainPlaylist {
 ///
 /// This just generates the playlist or segment from the URL.
 pub struct PlaylistOrSegment {
-    hls_url:    HlsUrl,
+    hls_params:    HlsParams,
     index:      Arc<StreamIndex>,
 }
 
 impl MainPlaylist {
-    fn new(hls_url: HlsUrl, index: Arc<StreamIndex>) -> MainPlaylist {
+    fn new(hls_params: HlsParams, index: Arc<StreamIndex>) -> MainPlaylist {
         let mut tracks = HashSet::default();
 
         // enable all tracks.
@@ -104,7 +106,7 @@ impl MainPlaylist {
         }
 
         MainPlaylist {
-            hls_url,
+            hls_params,
             index: index,
             tracks,
             codecs: Vec::new(),
@@ -116,11 +118,11 @@ impl MainPlaylist {
     /// Generate the main playlist.
     // TODO: returns Bytes instead of Vec<u8>
     pub fn generate(&self) -> crate::error::Result<Vec<u8>> {
-        match &self.hls_url.url_type {
+        match &self.hls_params.url_type {
             UrlType::MainPlaylist => {
                 let playlist = crate::playlist::generate_master_playlist(
                     &self.index,
-                    &self.hls_url.video_url,
+                    &self.hls_params.video_url,
                     Some(&self.index.stream_id),
                     &self.codecs,
                     &self.tracks,
@@ -155,25 +157,23 @@ impl PlaylistOrSegment {
     pub fn generate(&self) -> crate::error::Result<Vec<u8>> {
 
         // See if it's in the cache.
-        let segment_key = self.hls_url.to_string();
-        if let Some(c) = crate::segment::cache::get() {
+        let segment_key = self.hls_params.to_string();
+        if let Some(c) = crate::cache::segment_cache() {
             if let Some(b) = c.get(&self.index.stream_id, &segment_key) {
                 return Ok(b.to_vec());
             }
         }
         let mut cache_it = false;
 
-        let data = match &self.hls_url.url_type {
+        let data = match &self.hls_params.url_type {
             UrlType::MainPlaylist => panic!("impossible condition"),
             UrlType::Playlist(p) => {
                 let playlist = if let Some(audio_idx) = p.audio_track_id {
                     // Audio / Video interleaved playlist
-                    let force_aac_track = p.audio_transcode_to.as_deref() == Some("aac");
                     crate::playlist::variant::generate_interleaved_playlist(
                         &self.index,
                         p.track_id,
                         audio_idx,
-                        force_aac_track,
                     )
                 } else if self
                     .index
@@ -182,11 +182,9 @@ impl PlaylistOrSegment {
                     .any(|a| a.stream_index == p.track_id)
                 {
                     // Audio only playlist
-                    let force_aac_track = p.audio_transcode_to.as_deref() == Some("aac");
                     crate::playlist::variant::generate_audio_playlist(
                         &self.index,
                         p.track_id,
-                        force_aac_track,
                     )
                 } else if self
                     .index
@@ -204,7 +202,6 @@ impl PlaylistOrSegment {
             }
             UrlType::VideoSegment(v) => {
                 if let Some(audio_idx) = v.audio_track_id {
-                    let force_aac_track = v.audio_transcode_to.as_deref() == Some("aac");
                     if let Some(seq) = v.segment_id {
                         let segment = self.index.get_segment("video", seq)?;
                         let buf = crate::segment::generator::generate_interleaved_segment(
@@ -213,7 +210,6 @@ impl PlaylistOrSegment {
                             audio_idx,
                             segment,
                             &self.index.source_path,
-                            force_aac_track,
                         )
                         .map(|b| b.to_vec())?;
                         cache_it = true;
@@ -223,7 +219,6 @@ impl PlaylistOrSegment {
                             &self.index,
                             v.track_id,
                             audio_idx,
-                            force_aac_track,
                         )
                         .map(|b| b.to_vec())
                     }
@@ -243,14 +238,12 @@ impl PlaylistOrSegment {
                 }
             }
             UrlType::AudioSegment(a) => {
-                let force_aac_track = a.transcode_to.as_deref() == Some("aac");
                 if let Some(seq) = a.segment_id {
                     let buf = crate::segment::generator::generate_audio_segment(
                         &self.index,
                         a.track_id,
                         seq,
                         &self.index.source_path,
-                        force_aac_track,
                     )
                     .map(|b| b.to_vec())?;
                     cache_it = true;
@@ -259,7 +252,6 @@ impl PlaylistOrSegment {
                     crate::segment::generator::generate_audio_init_segment(
                         &self.index,
                         a.track_id,
-                        force_aac_track,
                     )
                     .map(|b| b.to_vec())
                 }
@@ -279,7 +271,7 @@ impl PlaylistOrSegment {
         }?;
 
         if cache_it {
-            if let Some(c) = crate::segment::cache::get() {
+            if let Some(c) = crate::cache::segment_cache() {
                 c.insert(
                     &self.index.stream_id,
                     &segment_key,

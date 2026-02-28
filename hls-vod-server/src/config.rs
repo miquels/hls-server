@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-pub use hls_vod_lib::SegmentCacheConfig;
+pub use hls_vod_lib::cache::SegmentCacheConfig;
 
 /// Segment configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]

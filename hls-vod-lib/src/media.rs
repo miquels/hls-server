@@ -1,21 +1,35 @@
-use crate::error::{HlsError, Result};
-use ffmpeg_next as ffmpeg;
+//! Media information.
+//!
+//! Call `StreamIndex::open()` to get information about a media file.
+//!
+//! ```
+//! let info = StreamIndex::open("file.mp4").expect("open file");
+//! println!("file has {} video and {} audio tracks",
+//!     info.video_streams.len(), info.audio_streams.len());
+//! ```
+//!
 use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::sync::MutexGuard;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+use ffmpeg_next as ffmpeg;
 use uuid::Uuid;
 
-pub use crate::segment::cache::{
-    cache_stats as segment_cache_stats, init_cache as init_segment_cache, SegmentCacheConfig,
-    SegmentCacheStats,
-};
+use crate::cache::{STREAMS_BY_ID, get_stream_by_id};
+use crate::error::{HlsError, Result};
+
+/// `ffmpeg_next::codec::Id`
+pub use ffmpeg_next::codec::Id;
+
+/// `ffmpeg_next::Rational`
+pub use ffmpeg_next::Rational;
 
 /// A transparent wrapper to access an FFmpeg Input context.
 /// It can either hold a freshly opened context (Owned) or a locked reference to a cached one (Shared).
-pub enum ContextGuard<'a> {
+pub(crate) enum ContextGuard<'a> {
     Owned(ffmpeg::format::context::Input),
     Shared(MutexGuard<'a, ffmpeg::format::context::Input>),
 }
@@ -87,14 +101,17 @@ pub struct AudioStreamInfo {
 /// A reference to a single subtitle sample in the source file.
 /// Used to precisely extract subtitles without scanning from the beginning.
 #[derive(Debug, Clone)]
-pub struct SubtitleSampleRef {
+pub(crate) struct SubtitleSampleRef {
     /// Byte offset within the source file where this subtitle sample begins
+    #[allow(dead_code)]
     pub byte_offset: u64,
     /// Presentation timestamp of the subtitle, in stream timebase units
     pub pts: i64,
     /// Duration of the subtitle display, in stream timebase units
+    #[allow(dead_code)]
     pub duration: i64,
     /// Raw byte size of the subtitle sample payload
+    #[allow(dead_code)]
     pub size: i32,
 }
 
@@ -112,7 +129,7 @@ pub struct SubtitleStreamInfo {
     /// A list of segment sequence numbers that contain at least one subtitle event (used to avoid serving empty segment files)
     pub non_empty_sequences: Vec<usize>,
     /// Pre-indexed index of every subtitle sample in the stream
-    pub sample_index: Vec<SubtitleSampleRef>,
+    pub(crate) sample_index: Vec<SubtitleSampleRef>,
     /// Subtitle stream timebase
     pub timebase: ffmpeg::Rational,
     /// Start time offset measured in timebase units
@@ -120,6 +137,7 @@ pub struct SubtitleStreamInfo {
 }
 
 /// Subtitle format enumeration.
+///
 /// Represents the supported types of textual and bitmap subtitle streams.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SubtitleFormat {
@@ -140,7 +158,7 @@ pub enum SubtitleFormat {
 /// Segment information.
 /// Represents a single time-bounded slice of the original file, used to generate an HLS segment.
 #[derive(Debug, Clone)]
-pub struct SegmentInfo {
+pub(crate) struct SegmentInfo {
     /// The consecutive segment sequence number starting from 0
     pub sequence: usize,
     /// Start presentation timestamp of the segment (in the video timeline's timebase)
@@ -150,19 +168,21 @@ pub struct SegmentInfo {
     /// Length of the segment in seconds
     pub duration_secs: f64,
     /// Whether the segment begins with a keyframe
+    #[allow(dead_code)]
     pub is_keyframe: bool,
     /// Approximate byte offset in the file corresponding to the video start point
+    #[allow(dead_code)]
     pub video_byte_offset: u64,
 }
 
 /// Stream index - metadata about a media file.
-/// This struct holds all the pre-calculated timings, tracks, and segment boundaries
-/// necessary to reliably serve HLS playlists and fragments on demand.
+///
+/// This struct holds information about audio/video/subtitle tracks.
 pub struct StreamIndex {
     /// A unique identifier for the stream instance
-    pub stream_id: String,
+    pub(crate) stream_id: String,
     /// Absolute path to the source media file
-    pub source_path: PathBuf,
+    pub(crate) source_path: PathBuf,
     /// Total duration of the media in seconds
     pub duration_secs: f64,
     /// The canonical video reference timebase used across all segments
@@ -174,17 +194,17 @@ pub struct StreamIndex {
     /// List of subtitle streams present in the media
     pub subtitle_streams: Vec<SubtitleStreamInfo>,
     /// Pre-calculated timeline boundaries breaking the content into HLS segments
-    pub segments: Vec<SegmentInfo>,
+    pub (crate) segments: Vec<SegmentInfo>,
     /// Instant when the index was created
-    pub indexed_at: SystemTime,
+    pub(crate) indexed_at: SystemTime,
     /// Last access timestamp mapped to Unix EPOCH for cache eviction checking
-    pub last_accessed: AtomicU64,
+    pub(crate) last_accessed: AtomicU64,
     /// Cache of the exact first PTS for each segment sequence, to perfectly align varying track timelines over time
-    pub segment_first_pts: Arc<Vec<AtomicI64>>,
+    pub(crate) segment_first_pts: Arc<Vec<AtomicI64>>,
     /// Protected cache of the opened FFmpeg format context to avoid reopening the file repeatedly
-    pub cached_context: Option<Arc<std::sync::Mutex<ffmpeg::format::context::Input>>>,
+    pub(crate) cached_context: Option<Arc<std::sync::Mutex<ffmpeg::format::context::Input>>>,
     /// Whether generated segments for this media should be aggressively cached and LRU bumped
-    pub cache_enabled: bool,
+    pub(crate) cache_enabled: bool,
 }
 
 impl std::fmt::Debug for StreamIndex {
@@ -233,71 +253,6 @@ impl Clone for StreamIndex {
     }
 }
 
-static STREAMS_BY_ID: std::sync::OnceLock<dashmap::DashMap<String, std::sync::Arc<StreamIndex>>> =
-    std::sync::OnceLock::new();
-
-/// Retrieve a tracked media stream by its generated stream ID
-pub fn get_stream_by_id(stream_id: &str) -> Option<std::sync::Arc<StreamIndex>> {
-    STREAMS_BY_ID
-        .get_or_init(dashmap::DashMap::new)
-        .get(stream_id)
-        .map(|r| r.value().clone())
-}
-
-/// Remove a tracked media stream by its generated stream ID
-pub fn remove_stream_by_id(stream_id: &str) {
-    if let Some(_media) = STREAMS_BY_ID
-        .get_or_init(dashmap::DashMap::new)
-        .remove(stream_id)
-    {
-        if let Some(c) = crate::segment::cache::get() {
-            c.remove_stream(stream_id);
-        }
-    }
-}
-
-/// Active stream metadata
-#[derive(serde::Serialize, Clone, Debug)]
-pub struct ActiveStreamInfo {
-    pub stream_id: String,
-    pub path: String,
-    pub duration: f64,
-}
-
-/// Fetch a list of active streams
-pub fn active_streams() -> Vec<ActiveStreamInfo> {
-    STREAMS_BY_ID
-        .get_or_init(dashmap::DashMap::new)
-        .iter()
-        .map(|r| ActiveStreamInfo {
-            stream_id: r.value().stream_id.clone(),
-            path: r.value().source_path.to_string_lossy().to_string(),
-            duration: r.value().duration_secs,
-        })
-        .collect()
-}
-
-/// Remove expired streams from tracking and cache
-pub fn cleanup_expired_streams() -> usize {
-    const STREAM_TIMEOUT_SECS: u64 = 600; // 10 minutes
-
-    let mut streams_to_remove = Vec::new();
-
-    for entry in STREAMS_BY_ID.get_or_init(dashmap::DashMap::new).iter() {
-        if entry.value().time_since_last_access() > STREAM_TIMEOUT_SECS {
-            streams_to_remove.push(entry.key().clone());
-        }
-    }
-
-    let mut count = 0;
-    for stream_id in streams_to_remove {
-        remove_stream_by_id(&stream_id);
-        count += 1;
-    }
-
-    count
-}
-
 #[cfg(test)]
 pub fn register_test_stream(index: std::sync::Arc<StreamIndex>) {
     STREAMS_BY_ID
@@ -324,19 +279,19 @@ impl StreamIndex {
         }
     }
 
-    pub fn init_segment_first_pts(&mut self) {
+    pub(crate) fn init_segment_first_pts(&mut self) {
         let n = self.segments.len();
         let v: Vec<AtomicI64> = (0..n).map(|_| AtomicI64::new(i64::MIN)).collect();
         self.segment_first_pts = Arc::new(v);
     }
 
-    pub fn set_segment_first_pts(&self, seq: usize, pts_90k: i64) {
+    pub(crate) fn set_segment_first_pts(&self, seq: usize, pts_90k: i64) {
         if let Some(slot) = self.segment_first_pts.get(seq) {
             slot.store(pts_90k, Ordering::Relaxed);
         }
     }
 
-    pub fn get_segment_first_pts(&self, seq: usize) -> Option<i64> {
+    pub(crate) fn get_segment_first_pts(&self, seq: usize) -> Option<i64> {
         self.segment_first_pts.get(seq).and_then(|slot| {
             let v = slot.load(Ordering::Relaxed);
             if v == i64::MIN {
@@ -347,7 +302,7 @@ impl StreamIndex {
         })
     }
 
-    pub fn get_segment(&self, segment_type: &str, sequence: usize) -> Result<&'_ SegmentInfo> {
+    pub(crate) fn get_segment(&self, segment_type: &str, sequence: usize) -> Result<&'_ SegmentInfo> {
         // TODO: segments should be a HashMap<u64, Segment> ?
         self.segments
             .iter()
@@ -361,7 +316,7 @@ impl StreamIndex {
 
     /// Retrieve a context to read the file.
     /// Returns either the locked cached context, or freshly opens the file if none is cached.
-    pub fn get_context(&self) -> Result<ContextGuard<'_>> {
+    pub(crate) fn get_context(&self) -> Result<ContextGuard<'_>> {
         if let Some(arc_mutex) = &self.cached_context {
             let guard = arc_mutex.lock().map_err(|_| {
                 HlsError::Ffmpeg(crate::error::FfmpegError::OpenInput(
@@ -377,7 +332,16 @@ impl StreamIndex {
         }
     }
 
-    pub fn open(
+    /// Parse a mp4/mkv/webm file.
+    pub fn parse(path: &Path) -> Result<StreamIndex> {
+        let options = crate::index::scanner::IndexOptions {
+            segment_duration_secs: 4.0,
+            index_segments: false,
+        };
+        crate::index::scanner::scan_file_with_options(path, &options)
+    }
+
+    pub(crate) fn open(
         path: &Path,
         stream_id: Option<String>,
     ) -> Result<Arc<StreamIndex>> {
@@ -435,12 +399,28 @@ impl StreamIndex {
             .collect()
     }
 
-    pub fn get_audio_stream(&self, stream_index: usize) -> Option<&'_ AudioStreamInfo> {
-        self.audio_streams.iter().find(|s| s.stream_index == stream_index)
+    pub(crate) fn get_audio_stream(&self, stream_index: usize) -> Result<&'_ AudioStreamInfo> {
+        self
+            .audio_streams
+            .iter()
+            .find(|s| s.stream_index == stream_index)
+            .ok_or_else(|| {
+                HlsError::StreamNotFound(format!("audio stream {} not found", stream_index))
+            })
     }
 
-    pub fn get_audio_stream_mut(&mut self, stream_index: usize) -> Option<&'_ mut AudioStreamInfo> {
+    pub(crate) fn get_audio_stream_mut(&mut self, stream_index: usize) -> Option<&'_ mut AudioStreamInfo> {
         self.audio_streams.iter_mut().find(|s| s.stream_index == stream_index)
+    }
+
+    pub(crate) fn get_subtitle_stream(&self, track_index: usize) -> Result<&'_ SubtitleStreamInfo> {
+        self
+            .subtitle_streams
+            .iter()
+            .find(|s| s.stream_index == track_index)
+            .ok_or_else(|| {
+                HlsError::StreamNotFound(format!("subtitle stream {} not found", track_index))
+            })
     }
 
     pub fn is_vod(&self) -> bool {
@@ -451,7 +431,7 @@ impl StreamIndex {
         self.segments.len()
     }
 
-    pub fn touch(&self) {
+    pub(crate) fn touch(&self) {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -459,7 +439,7 @@ impl StreamIndex {
         self.last_accessed.store(now, Ordering::Relaxed);
     }
 
-    pub fn time_since_last_access(&self) -> u64 {
+    pub(crate) fn time_since_last_access(&self) -> u64 {
         let last = self.last_accessed.load(Ordering::Relaxed);
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)

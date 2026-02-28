@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod tests {
     use crate::ffmpeg_utils::ffmpeg;
-    use crate::types::{SegmentInfo, StreamIndex};
+    use crate::media::{SegmentInfo, StreamIndex};
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicI64, AtomicU64};
     use std::sync::Arc;

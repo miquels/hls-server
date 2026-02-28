@@ -6,7 +6,7 @@ use std::collections::{HashMap, HashSet};
 
 use ffmpeg_next as ffmpeg;
 
-use crate::types::StreamIndex;
+use crate::media::StreamIndex;
 use super::codec::*;
 
 /// Generate master playlist content
@@ -80,9 +80,11 @@ pub fn generate_master_playlist(
     }
 
     /// Return the codec-family GROUP-ID for a given stream.
-    fn group_id_for_stream(stream: &crate::types::AudioStreamInfo) -> String {
+    // FIXME: codec_name_short can fail, not sure about the fallback to aac.
+    // Probably better to filter out unknown codecs.
+    fn group_id_for_stream(stream: &crate::media::AudioStreamInfo) -> String {
         let codec = stream.transcode_to.unwrap_or(stream.codec_id);
-        format!("audio-{}", codec_name_short(codec, Some("aac")))
+        format!("audio-{}", codec_name_short(codec).unwrap_or("aac"))
     }
 
     /// HLS codec string we advertise for a given group.
@@ -126,13 +128,18 @@ pub fn generate_master_playlist(
             let is_first_in_group = seen_groups.insert(group_id.clone());
             let default = if is_first_in_group { "YES" } else { "NO" };
 
-            let uri = crate::url::HlsUrl {
+            let audio_transcode_to = variant
+                .transcode_to
+                .and_then(|c| codec_name_short(c))
+                .map(String::from);
+
+            let uri = crate::params::HlsParams {
                 video_url: video_url.to_string(),
                 session_id: session_id.map(|s| s.to_string()),
-                url_type: crate::url::UrlType::Playlist(crate::url::Playlist {
+                url_type: crate::params::UrlType::Playlist(crate::params::Playlist {
                     track_id: variant.stream_index,
                     audio_track_id: None,
-                    audio_transcode_to: variant.transcode_to.map(|c| codec_name_short(c, None)),
+                    audio_transcode_to,
                 }),
             };
 
@@ -153,10 +160,10 @@ pub fn generate_master_playlist(
             let group_id = "subs";
             let name = format!("{} Subtitles", language.to_uppercase());
             let default = if i == 0 { "YES" } else { "NO" };
-            let uri = crate::url::HlsUrl {
+            let uri = crate::params::HlsParams {
                 video_url: video_url.to_string(),
                 session_id: session_id.map(|s| s.to_string()),
-                url_type: crate::url::UrlType::Playlist(crate::url::Playlist {
+                url_type: crate::params::UrlType::Playlist(crate::params::Playlist {
                     track_id: sub.stream_index,
                     audio_track_id: None,
                     audio_transcode_to: None,
@@ -245,13 +252,18 @@ pub fn generate_master_playlist(
                 String::new()
             };
 
-            let uri = crate::url::HlsUrl {
+            let audio_transcode_to = audio
+                .transcode_to
+                .and_then(|c| codec_name_short(c))
+                .map(String::from);
+
+            let uri = crate::params::HlsParams {
                 video_url: video_url.to_string(),
                 session_id: session_id.map(|s| s.to_string()),
-                url_type: crate::url::UrlType::Playlist(crate::url::Playlist {
+                url_type: crate::params::UrlType::Playlist(crate::params::Playlist {
                     track_id: video_idx,
                     audio_track_id: Some(audio_idx),
-                    audio_transcode_to: audio.transcode_to.map(|c| codec_name_short(c, None)),
+                    audio_transcode_to,
                 }),
             };
 
@@ -277,10 +289,10 @@ pub fn generate_master_playlist(
                 .map(|c| format!(",CODECS=\"{}\"", c))
                 .unwrap_or_default();
 
-            let uri = crate::url::HlsUrl {
+            let uri = crate::params::HlsParams {
                 video_url: video_url.to_string(),
                 session_id: session_id.map(|s| s.to_string()),
-                url_type: crate::url::UrlType::Playlist(crate::url::Playlist {
+                url_type: crate::params::UrlType::Playlist(crate::params::Playlist {
                     track_id: video.stream_index,
                     audio_track_id: None,
                     audio_transcode_to: None,
@@ -331,10 +343,10 @@ pub fn generate_master_playlist(
                 let bandwidth =
                     calculate_bandwidth(video.bitrate.max(100_000), &group_audio_bitrates);
 
-                let uri = crate::url::HlsUrl {
+                let uri = crate::params::HlsParams {
                     video_url: video_url.to_string(),
                     session_id: session_id.map(|s| s.to_string()),
-                    url_type: crate::url::UrlType::Playlist(crate::url::Playlist {
+                    url_type: crate::params::UrlType::Playlist(crate::params::Playlist {
                         track_id: video.stream_index,
                         audio_track_id: None,
                         audio_transcode_to: None,
@@ -355,7 +367,7 @@ pub fn generate_master_playlist(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{AudioStreamInfo, SubtitleFormat, SubtitleStreamInfo, VideoStreamInfo};
+    use crate::media::{AudioStreamInfo, SubtitleFormat, SubtitleStreamInfo, VideoStreamInfo};
     use ffmpeg_next as ffmpeg;
     use std::path::PathBuf;
 

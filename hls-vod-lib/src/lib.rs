@@ -15,44 +15,54 @@
 //! ## Usage
 //!
 //! ```
-//! // Parse the URL path.
-//! let hls_url = hls_vod_lib::HlsUrl::parse(&url_path)?;
-//! 
-//! // Calculate path to video file.
-//! let media_path = std::path::PathBuf::from(&format!("/{}", hls_url.video_url));
+//! fn main() {
+//!     hls_vod_lib::ffmpeg_init();
+//!     hls_vod_lib::ffmpeg_log_filter();
 //!
-//! // Open video.
-//! let hls_video = HlsVideo::new(&media_path, hls_url)?;
-//!
-//! // Filter codecs, enable/disable tracks, etc.
-//! if let HlsVideo::MainPlaylist(p) = &mut hls_video {
-//!     p.filter_codecs(&["aac"]);
+//!     start_http_server();
 //! }
 //!
-//! // Generate playlist or segments.
-//! serve_http(hls_video.generate());
+//! fn handle_request(url_path: &str) -> Result<Vec<u8>> {
+//!     // Parse the URL path.
+//!     let hls_params = hls_vod_lib::HlsParams::parse(&url_path)?;
+//! 
+//!     // Calculate path to video file.
+//!     let media_path = std::path::PathBuf::from(&format!("/{}", hls_params.video_url));
+//!
+//!     // Open video.
+//!     let mut hls_video = HlsVideo::open(&media_path, hls_params)?;
+//!
+//!     // Filter codecs, enable/disable tracks, etc.
+//!     if let HlsVideo::MainPlaylist(p) = &mut hls_video {
+//!         p.filter_codecs(&["aac"]);
+//!     }
+//!
+//!     // Generate playlist or segments.
+//!     hls_video.generate()
+//! }
 //! ```
 //!
-//! If you are using an async server such as Axum, you should wrap `HlsVideo::new`
+//! If you are using an async server such as Axum, you should wrap `HlsVideo::open`
 //! and `hls_video.generate()` in calls to `tokio::task::spawn_blocking()`.
 //!
 pub(crate) mod error;
 pub(crate) mod ffmpeg_utils;
-pub(crate) mod hlsvideo;
 pub(crate) mod index;
 pub(crate) mod playlist;
 pub(crate) mod segment;
 pub(crate) mod subtitle;
 pub(crate) mod transcode;
-pub(crate) mod types;
-pub(crate) mod url;
+
+pub mod cache;
+pub mod hlsvideo;
+pub mod media;
+pub mod params;
 
 #[cfg(test)]
 pub(crate) mod tests;
 
 pub use error::{FfmpegError, HlsError, Result};
 pub use ffmpeg_utils::version_info as ffmpeg_version_info;
-pub use ffmpeg_utils::{init, install_log_filter};
-pub use hlsvideo::*;
-pub use types::*;
-pub use url::*;
+pub use ffmpeg_utils::{init as ffmpeg_init, install_log_filter as ffmpeg_log_filter};
+pub use hlsvideo::HlsVideo;
+pub use params::HlsParams;

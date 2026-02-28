@@ -1,7 +1,7 @@
 //! Audio stream analysis
 
 use crate::error::Result;
-use crate::types::AudioStreamInfo;
+use crate::media::AudioStreamInfo;
 use ffmpeg_next as ffmpeg;
 
 /// Analyze an audio stream and extract metadata

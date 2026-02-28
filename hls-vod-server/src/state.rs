@@ -22,7 +22,7 @@ pub struct AppState {
 
 impl AppState {
     pub fn new(config: ServerConfig) -> Self {
-        hls_vod_lib::init_segment_cache(config.cache.clone());
+        hls_vod_lib::cache::init_segment_cache(config.cache.clone());
 
         Self {
             shutdown: AtomicBool::new(false),
@@ -36,8 +36,8 @@ impl AppState {
     }
 
     /// Get cache statistics
-    pub fn cache_stats(&self) -> hls_vod_lib::SegmentCacheStats {
-        hls_vod_lib::segment_cache_stats()
+    pub fn cache_stats(&self) -> hls_vod_lib::cache::SegmentCacheStats {
+        hls_vod_lib::cache::segment_cache_stats()
     }
 
     /// Signal shutdown
@@ -53,7 +53,7 @@ impl AppState {
 
     /// Remove expired streams
     pub fn cleanup_expired_streams(&self) -> usize {
-        hls_vod_lib::cleanup_expired_streams()
+        hls_vod_lib::cache::cleanup_expired_streams()
     }
 }
 

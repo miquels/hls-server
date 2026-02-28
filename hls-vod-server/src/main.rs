@@ -38,8 +38,8 @@ async fn main() -> Result<()> {
     tracing::info!("FFmpeg version: {}", hls_vod_lib::ffmpeg_version_info());
 
     // Initialize FFmpeg and install log filter
-    hls_vod_lib::init().map_err(|e| crate::error::ServerError::Internal(e.to_string()))?;
-    hls_vod_lib::install_log_filter();
+    hls_vod_lib::ffmpeg_init().map_err(|e| crate::error::ServerError::Internal(e.to_string()))?;
+    hls_vod_lib::ffmpeg_log_filter();
     tracing::info!("FFmpeg initialized successfully");
 
     // Load configuration
