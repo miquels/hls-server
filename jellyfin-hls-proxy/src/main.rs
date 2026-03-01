@@ -46,6 +46,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "/Items/:item_id/PlaybackInfo",
             axum::routing::post(playback_info_handler),
         )
+        .route("/proxymedia/*path", axum::routing::get(proxymedia_handler))
         .fallback(any(proxy_handler))
         .with_state(state);
 
@@ -203,8 +204,9 @@ async fn playback_info_handler(
         if let Some(media_sources) = json.get_mut("MediaSources").and_then(|v| v.as_array_mut()) {
             for source in media_sources.iter_mut() {
                 if let Some(path) = source.get("Path").and_then(|v| v.as_str()) {
-                    let encoded_path = urlencoding::encode(path);
-                    let transcode_url = format!("/proxymedia/master.m3u8?file={}", encoded_path);
+                    let clean_path = path.trim_start_matches('/');
+                    let transcode_url =
+                        format!("/proxymedia/{}.as.m3u8", urlencoding::encode(clean_path));
 
                     source["TranscodingUrl"] = serde_json::json!(transcode_url);
                     source["TranscodingSubProtocol"] = serde_json::json!("hls");
@@ -244,4 +246,91 @@ async fn playback_info_handler(
     response_builder
         .body(body)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+async fn proxymedia_handler(
+    axum::extract::Path(path): axum::extract::Path<String>,
+    axum::extract::Query(query_params): axum::extract::Query<
+        std::collections::HashMap<String, String>,
+    >,
+) -> Result<Response, StatusCode> {
+    tracing::info!("Proxymedia request for path: {}", path);
+    // Path comes in like Users/mikevs/Devel/...
+    let mut clean_path = path.clone();
+    if !clean_path.starts_with('/') {
+        clean_path = format!("/{}", clean_path);
+    }
+
+    // Fallback to removing the leading slash if parsing fails (for the relative paths)
+    let hls_url = match hls_vod_lib::HlsParams::parse(&clean_path) {
+        Some(params) => params,
+        None => hls_vod_lib::HlsParams::parse(&path).ok_or_else(|| {
+            tracing::error!("Invalid HLS request: {}", path);
+            StatusCode::BAD_REQUEST
+        })?,
+    };
+
+    tracing::info!("Parsed HLS URL: {:?}", hls_url);
+
+    let media_path = std::path::PathBuf::from(&hls_url.video_url);
+    if !media_path.exists() {
+        tracing::error!("Media file not found: {:?}", media_path);
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    tokio::task::spawn_blocking(move || {
+        let mut hls_video = hls_vod_lib::HlsVideo::open(&media_path, hls_url).map_err(|e| {
+            tracing::error!("Failed to open media: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+        if let hls_vod_lib::HlsVideo::MainPlaylist(p) = &mut hls_video {
+            let codecs: Vec<String> = query_params
+                .get("codecs")
+                .map(|s| s.split(',').map(|c| c.trim().to_string()).collect())
+                .unwrap_or_default();
+            p.filter_codecs(&codecs);
+
+            let tracks: Vec<usize> = query_params
+                .get("tracks")
+                .map(|s| {
+                    s.split(',')
+                        .filter_map(|s| s.parse::<usize>().ok())
+                        .collect::<Vec<usize>>()
+                })
+                .unwrap_or_default();
+            if !tracks.is_empty() {
+                p.enable_tracks(&tracks);
+            }
+
+            if query_params
+                .get("interleave")
+                .map(|v| v == "true" || v == "1")
+                .unwrap_or(false)
+            {
+                p.interleave();
+            }
+        }
+
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            axum::http::header::CONTENT_TYPE,
+            axum::http::HeaderValue::from_static(hls_video.mime_type()),
+        );
+        headers.insert(
+            axum::http::header::CACHE_CONTROL,
+            axum::http::HeaderValue::from_static(hls_video.cache_control()),
+        );
+
+        let bytes = hls_video.generate().map_err(|e| {
+            tracing::error!("Failed to generate HLS data: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+        let mut response = Response::new(Body::from(bytes));
+        *response.headers_mut() = headers;
+        Ok(response)
+    })
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
 }

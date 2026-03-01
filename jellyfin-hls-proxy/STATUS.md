@@ -28,6 +28,17 @@
 - Intercepted the downstream Jellyfin JSON response in the `playback_info_handler`.
 - Parsed the Jellyfin device capability evaluation to locate the `MediaSources` array.
 - Extracted the physical file `Path` for each media source.
-- Generated a mapped proxy `TranscodingUrl` (`/proxymedia/master.m3u8?file={encoded_path}`) that points to our standalone HLS handlers.
+- Generated a mapped proxy `TranscodingUrl` (`/proxymedia/...`) that points to our standalone HLS handlers.
 - Modified proxy response indicating that `TranscodingContainer` is `ts` (to mimic standard behavior) and set `SupportsTranscoding` to `true`, forcing the Jellyfin client to use our server for streaming.
 - Successfully repacked and returned the modified JSON body with adjusted `CONTENT_LENGTH` to the requesting client.
+
+## Milestone 4: HLS Playlist and Segment Handlers
+**Status**: Completed
+
+**Summary:**
+- Implemented a dedicated Axum handler for `GET /proxymedia/*path`.
+- Extracted and decoded the upstream media `path` from the URL parameter.
+- Integrated `hls_vod_lib::HlsParams::parse` to parse the requested HLS entity (MainPlaylist, Audio/Video Segments, VTT subtitles).
+- Invoked `HlsVideo::open` and `hls_video.generate()` to seamlessly scan the video file on-the-fly and perform required segmentation/transmuxing without shelling out to `ffmpeg`.
+- Correctly parsed incoming proxy query parameters (`codecs`, `tracks`, `interleave`) to filter and stream the custom track combinations desired by the client.
+- Handled MIME types, `CACHE-CONTROL`, and binary HLS generation synchronously within a `tokio::task::spawn_blocking` thread to prevent starving the Axum async executor.
