@@ -42,3 +42,12 @@
 - Invoked `HlsVideo::open` and `hls_video.generate()` to seamlessly scan the video file on-the-fly and perform required segmentation/transmuxing without shelling out to `ffmpeg`.
 - Correctly parsed incoming proxy query parameters (`codecs`, `tracks`, `interleave`) to filter and stream the custom track combinations desired by the client.
 - Handled MIME types, `CACHE-CONTROL`, and binary HLS generation synchronously within a `tokio::task::spawn_blocking` thread to prevent starving the Axum async executor.
+
+## Milestone 5: Polish & Testing
+**Status**: Completed
+
+**Summary:**
+- Refactored the JSON mutation logic in `main.rs` into isolated functions (`mutate_playback_info_request` and `mutate_playback_info_response`).
+- Brought in `tower_http::trace::TraceLayer` and applied it to the Axum Router to provide detailed, structured HTTP request/response logging via `tracing`.
+- Created basic unit/integration tests to guarantee that device profiles are correctly injected before hitting Jellyfin, and that the server correctly maps responses to the `TranscodingUrl`.
+- Verified the build via `cargo check` and `cargo test`, successfully passing all assertions and effectively finishing the proxy implementation.

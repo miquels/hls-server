@@ -9,6 +9,7 @@ use axum::{
 use clap::Parser;
 use reqwest::Client;
 use std::sync::Arc;
+use tower_http::trace::TraceLayer;
 
 #[derive(Parser, Debug, Clone)]
 #[command(author, version, about, long_about = None)]
@@ -48,6 +49,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .route("/proxymedia/*path", axum::routing::get(proxymedia_handler))
         .fallback(any(proxy_handler))
+        .layer(TraceLayer::new_for_http())
         .with_state(state);
 
     let addr: std::net::SocketAddr = args.listen.parse()?;
@@ -132,22 +134,7 @@ async fn playback_info_handler(
     let mut json: serde_json::Value =
         serde_json::from_slice(&body_bytes).unwrap_or_else(|_| serde_json::json!({}));
 
-    let dp_profile = serde_json::json!({
-        "Container": "mp4,m4v,mkv,webm",
-        "VideoCodec": "h264,h265,vp9",
-        "AudioCodec": "aac,mp3,ac3,eac3,opus",
-        "Type": "Video"
-    });
-
-    if let Some(device_profile) = json.get_mut("DeviceProfile") {
-        device_profile["DirectPlayProfiles"] = serde_json::json!([dp_profile]);
-        device_profile["TranscodingProfiles"] = serde_json::json!([]);
-    } else {
-        json["DeviceProfile"] = serde_json::json!({
-            "DirectPlayProfiles": [dp_profile],
-            "TranscodingProfiles": []
-        });
-    }
+    mutate_playback_info_request(&mut json);
 
     let modified_body = serde_json::to_vec(&json).unwrap();
 
@@ -201,23 +188,7 @@ async fn playback_info_handler(
         let mut json: serde_json::Value =
             serde_json::from_slice(&body_bytes).unwrap_or_else(|_| serde_json::json!({}));
 
-        if let Some(media_sources) = json.get_mut("MediaSources").and_then(|v| v.as_array_mut()) {
-            for source in media_sources.iter_mut() {
-                if let Some(path) = source.get("Path").and_then(|v| v.as_str()) {
-                    let clean_path = path.trim_start_matches('/');
-                    let transcode_url =
-                        format!("/proxymedia/{}.as.m3u8", urlencoding::encode(clean_path));
-
-                    source["TranscodingUrl"] = serde_json::json!(transcode_url);
-                    source["TranscodingSubProtocol"] = serde_json::json!("hls");
-                    source["TranscodingContainer"] = serde_json::json!("ts");
-
-                    source["SupportsDirectPlay"] = serde_json::json!(false);
-                    source["SupportsDirectStream"] = serde_json::json!(false);
-                    source["SupportsTranscoding"] = serde_json::json!(true);
-                }
-            }
-        }
+        mutate_playback_info_response(&mut json);
 
         let modified_body = serde_json::to_vec(&json).unwrap();
 
@@ -333,4 +304,95 @@ async fn proxymedia_handler(
     })
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+}
+
+fn mutate_playback_info_request(json: &mut serde_json::Value) {
+    let dp_profile = serde_json::json!({
+        "Container": "mp4,m4v,mkv,webm",
+        "VideoCodec": "h264,h265,vp9",
+        "AudioCodec": "aac,mp3,ac3,eac3,opus",
+        "Type": "Video"
+    });
+
+    if let Some(device_profile) = json.get_mut("DeviceProfile") {
+        device_profile["DirectPlayProfiles"] = serde_json::json!([dp_profile]);
+        device_profile["TranscodingProfiles"] = serde_json::json!([]);
+    } else {
+        json["DeviceProfile"] = serde_json::json!({
+            "DirectPlayProfiles": [dp_profile],
+            "TranscodingProfiles": []
+        });
+    }
+}
+
+fn mutate_playback_info_response(json: &mut serde_json::Value) {
+    if let Some(media_sources) = json.get_mut("MediaSources").and_then(|v| v.as_array_mut()) {
+        for source in media_sources.iter_mut() {
+            if let Some(path) = source.get("Path").and_then(|v| v.as_str()) {
+                let clean_path = path.trim_start_matches('/');
+                let transcode_url =
+                    format!("/proxymedia/{}.as.m3u8", urlencoding::encode(clean_path));
+
+                source["TranscodingUrl"] = serde_json::json!(transcode_url);
+                source["TranscodingSubProtocol"] = serde_json::json!("hls");
+                source["TranscodingContainer"] = serde_json::json!("ts");
+
+                source["SupportsDirectPlay"] = serde_json::json!(false);
+                source["SupportsDirectStream"] = serde_json::json!(false);
+                source["SupportsTranscoding"] = serde_json::json!(true);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_mutate_playback_info_request() {
+        let mut json = serde_json::json!({
+            "DeviceProfile": {
+                "TranscodingProfiles": [{"Container": "mp3"}],
+                "DirectPlayProfiles": []
+            }
+        });
+        mutate_playback_info_request(&mut json);
+        let device_profile = &json["DeviceProfile"];
+        assert_eq!(
+            device_profile["TranscodingProfiles"]
+                .as_array()
+                .unwrap()
+                .len(),
+            0
+        );
+        assert_eq!(
+            device_profile["DirectPlayProfiles"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        let dp = &device_profile["DirectPlayProfiles"][0];
+        assert_eq!(dp["VideoCodec"], "h264,h265,vp9");
+    }
+
+    #[test]
+    fn test_mutate_playback_info_response() {
+        let mut json = serde_json::json!({
+            "MediaSources": [
+                {
+                    "Path": "/some/media/file.mp4"
+                }
+            ]
+        });
+        mutate_playback_info_response(&mut json);
+        let media_sources = &json["MediaSources"][0];
+        assert_eq!(media_sources["SupportsDirectPlay"].as_bool(), Some(false));
+        assert_eq!(media_sources["SupportsTranscoding"].as_bool(), Some(true));
+        assert_eq!(
+            media_sources["TranscodingUrl"].as_str().unwrap(),
+            "/proxymedia/some%2Fmedia%2Ffile.mp4.as.m3u8"
+        );
+    }
 }
