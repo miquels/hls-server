@@ -19,17 +19,18 @@ pub async fn playback_info_handler(
     body: Bytes,
 ) -> Result<Response, StatusCode> {
     tracing::info!("PlaybackInfo request received: {} {}", method, uri.path());
+
     // 1. Decode request
     let mut req_data: PlaybackInfoRequest = if body.is_empty() {
         PlaybackInfoRequest::default()
     } else {
-        serde_json::from_slice(&body).unwrap_or_else(|e| {
-            tracing::warn!(
-                "Failed to decode PlaybackInfo request: {}, using default",
-                e
-            );
-            PlaybackInfoRequest::default()
-        })
+        match serde_json::from_slice(&body) {
+            Ok(payload) => payload,
+            Err(e) => {
+                tracing::warn!("Failed to decode PlaybackInfo request: {}", e);
+                return Err(StatusCode::BAD_REQUEST);
+            }
+        }
     };
 
     let user_agent = headers
@@ -97,17 +98,21 @@ pub async fn playback_info_handler(
         })?;
 
         // 3. Decode response
-        let mut resp_data: PlaybackInfoResponse = serde_json::from_slice(&resp_body_bytes)
-            .unwrap_or_else(|e| {
+        let mut resp_data: PlaybackInfoResponse = match serde_json::from_slice(&resp_body_bytes) {
+            Ok(payload) => payload,
+            Err(e) => {
                 tracing::warn!(
                     "Failed to decode PlaybackInfo response: {}, returning default",
                     e
                 );
-                PlaybackInfoResponse::default()
-            });
+                return Err(StatusCode::BAD_REQUEST);
+            }
+        };
 
         // 4. Mutate response
-        mutate_playback_info_response(&mut resp_data);
+        if let Err(e) = mutate_playback_info_response(&mut resp_data) {
+            return Err(e);
+        }
 
         let modified_resp_body = serde_json::to_vec(&resp_data).unwrap();
 
@@ -148,19 +153,13 @@ pub async fn playback_info_handler(
 }
 
 fn mutate_playback_info_request(req: &mut PlaybackInfoRequest, user_agent: Option<&str>) {
-    let dp_profile = crate::types::DirectPlayProfile {
-        container: Some("mp4,m4v,mkv,webm".to_string()),
-        video_codec: Some("h264,h265,vp9".to_string()),
-        audio_codec: Some("aac,mp3,ac3,eac3,opus".to_string()),
-        profile_type: "Video".to_string(),
-    };
-
     let is_safari = user_agent.map_or(false, |ua| {
         ua.contains("Safari") && !ua.contains("Chrome") && !ua.contains("Chromium")
     });
 
     if let Some(device_profile) = req.device_profile.as_mut() {
         // Remove 'ts' transcoding support from TranscodingProfiles
+        // Optional fields will be handled cleanly by #[serde(skip_serializing_if)]
         device_profile
             .transcoding_profiles
             .retain(|p| p.container.as_deref() != Some("ts"));
@@ -173,23 +172,19 @@ fn mutate_playback_info_request(req: &mut PlaybackInfoRequest, user_agent: Optio
                     }
                 }
             }
-        } else {
-            device_profile.direct_play_profiles = vec![dp_profile];
         }
-    } else {
-        req.device_profile = Some(crate::types::DeviceProfile {
-            direct_play_profiles: vec![dp_profile],
-            transcoding_profiles: vec![],
-            ..Default::default()
-        });
     }
 }
 
-fn mutate_playback_info_response(resp: &mut PlaybackInfoResponse) {
+fn mutate_playback_info_response(resp: &mut PlaybackInfoResponse) -> Result<(), StatusCode> {
     for source in resp.media_sources.iter_mut() {
         let clean_path = source.path.trim_start_matches('/');
-        let mut base_transcode_url =
-            format!("/proxymedia/{}.as.m3u8", urlencoding::encode(clean_path));
+        let encoded_path = clean_path
+            .split('/')
+            .map(|segment| urlencoding::encode(segment).into_owned())
+            .collect::<Vec<_>>()
+            .join("/");
+        let mut base_transcode_url = format!("/proxymedia/{}.as.m3u8", encoded_path);
 
         if let Some(orig_url_str) = &source.transcoding_url {
             // Some Jellyfin URLs might be relative. We'll prepend a dummy base so we can parse them.
@@ -199,37 +194,51 @@ fn mutate_playback_info_response(resp: &mut PlaybackInfoResponse) {
                 orig_url_str.clone()
             };
 
-            if let Ok(parsed_url) = url::Url::parse(&full_url_str) {
-                let query_str = parsed_url.query().unwrap_or("");
-                if let Ok(params) =
-                    serde_urlencoded::from_str::<crate::types::HlsTranscodingParameters>(query_str)
-                {
-                    let mut proxy_query = Vec::new();
-
-                    let mut codecs = Vec::new();
-                    if let Some(vc) = &params.video_codec {
-                        codecs.push(vc.clone());
-                    }
-                    if let Some(ac) = &params.audio_codec {
-                        codecs.push(ac.clone());
-                    }
-                    if !codecs.is_empty() {
-                        proxy_query.push(format!("codecs={}", codecs.join(",")));
-                    }
-
-                    if let Some(audio_idx) = params.audio_stream_index {
-                        proxy_query.push(format!("tracks={}", audio_idx));
-                    }
-
-                    if let Some(session_id) = &params.play_session_id {
-                        proxy_query.push(format!("stream_id={}", urlencoding::encode(session_id)));
-                    }
-
-                    if !proxy_query.is_empty() {
-                        base_transcode_url =
-                            format!("{}?{}", base_transcode_url, proxy_query.join("&"));
-                    }
+            let parsed_url = match url::Url::parse(&full_url_str) {
+                Ok(parsed_url) => parsed_url,
+                Err(e) => {
+                    tracing::warn!("Failed to parse PlaybackInfo transcoding URL: {}", e);
+                    return Err(StatusCode::BAD_REQUEST);
                 }
+            };
+
+            let query_str = parsed_url.query().unwrap_or("");
+            let params = match serde_urlencoded::from_str::<crate::types::HlsTranscodingParameters>(
+                query_str,
+            ) {
+                Ok(params) => params,
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to parse PlaybackInfo transcoding query string: {}",
+                        e
+                    );
+                    return Err(StatusCode::BAD_REQUEST);
+                }
+            };
+
+            let mut proxy_query = Vec::new();
+
+            let mut codecs = Vec::new();
+            if let Some(vc) = &params.video_codec {
+                codecs.push(vc.clone());
+            }
+            if let Some(ac) = &params.audio_codec {
+                codecs.push(ac.clone());
+            }
+            if !codecs.is_empty() {
+                proxy_query.push(format!("codecs={}", codecs.join(",")));
+            }
+
+            if let Some(audio_idx) = params.audio_stream_index {
+                proxy_query.push(format!("tracks={}", audio_idx));
+            }
+
+            if let Some(session_id) = &params.play_session_id {
+                proxy_query.push(format!("stream_id={}", urlencoding::encode(session_id)));
+            }
+
+            if !proxy_query.is_empty() {
+                base_transcode_url = format!("{}?{}", base_transcode_url, proxy_query.join("&"));
             }
         }
 
@@ -241,6 +250,8 @@ fn mutate_playback_info_response(resp: &mut PlaybackInfoResponse) {
         source.supports_direct_stream = false;
         source.supports_transcoding = true;
     }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -281,9 +292,7 @@ mod tests {
             device_profile.transcoding_profiles[0].container.as_deref(),
             Some("mp3")
         );
-        assert_eq!(device_profile.direct_play_profiles.len(), 1);
-        let dp = &device_profile.direct_play_profiles[0];
-        assert_eq!(dp.video_codec.as_deref(), Some("h264,h265,vp9"));
+        assert_eq!(device_profile.direct_play_profiles.len(), 0);
     }
 
     #[test]
@@ -318,13 +327,13 @@ mod tests {
             }],
             ..Default::default()
         };
-        mutate_playback_info_response(&mut resp);
+        mutate_playback_info_response(&mut resp).unwrap();
         let media_source = &resp.media_sources[0];
         assert_eq!(media_source.supports_direct_play, false);
         assert_eq!(media_source.supports_transcoding, true);
         assert_eq!(
             media_source.transcoding_url.as_deref(),
-            Some("/proxymedia/some%2Fmedia%2Ffile.mp4.as.m3u8")
+            Some("/proxymedia/some/media/file.mp4.as.m3u8")
         );
     }
 
@@ -338,7 +347,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        mutate_playback_info_response(&mut resp);
+        mutate_playback_info_response(&mut resp).unwrap();
         let media_source = &resp.media_sources[0];
         assert_eq!(
             media_source.transcoding_url.as_deref(),
