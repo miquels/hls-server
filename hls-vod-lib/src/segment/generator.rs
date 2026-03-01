@@ -140,6 +140,9 @@ pub(crate) fn generate_audio_init_segment(
             if let Some(output_tb) = muxer.get_output_timebase(track_index) {
                 pkt.rescale_ts(input_tb, output_tb);
             }
+            // Force PTS/DTS to 0 so FFmpeg doesn't generate an elst with a media_time delay
+            pkt.set_pts(Some(0));
+            pkt.set_dts(Some(0));
             first_packet = Some(pkt);
             break;
         }
@@ -481,9 +484,8 @@ fn generate_transcoded_audio_segment(
     };
 
     // Use a large multiplier for fragment sequence numbers to ensure they are
-    // monotonically increasing and unique across ALL segments and fragments.
-    // Each segment is allocated 1000 IDs, which is plenty for typical segment lengths.
-    let start_frag_seq = (segment.sequence as u32).wrapping_mul(1000).wrapping_add(1);
+    // Each segment gets its own ID. We use segment.sequence + 1 to be contiguous (1-based).
+    let start_frag_seq = segment.sequence as u32 + 1;
 
     patch_tfdts(&mut media_data, target_time, start_frag_seq);
 
@@ -1121,7 +1123,7 @@ fn generate_media_segment_ffmpeg(
     let mut media_data = full_data[media_offset..].to_vec();
 
     // Start fragment sequence for this segment.
-    let start_frag_seq = (segment.sequence as u32).wrapping_mul(1000).wrapping_add(1);
+    let start_frag_seq = segment.sequence as u32 + 1;
 
     // Normalize timeline to 0-based by anchoring to segment.start_pts (which is already 0-based in index).
     // This ensures EXTINF durations match the tfdt timeline perfectly across all track types.
