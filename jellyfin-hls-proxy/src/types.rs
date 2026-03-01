@@ -328,3 +328,84 @@ pub struct MediaStream {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub is_interleaved: Option<bool>,
 }
+
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "PascalCase")]
+pub struct HlsTranscodingParameters {
+    // --- Identity & Session ---
+    pub id: String,
+    pub media_source_id: String,
+    pub device_id: Option<String>,
+    pub play_session_id: Option<String>,
+    pub api_key: Option<String>,
+    /// Unique tag for caching/identification of the specific media version
+    pub tag: Option<String>,
+
+    // --- Stream Selection & Logic ---
+    pub audio_stream_index: Option<i32>,
+    pub subtitle_stream_index: Option<i32>,
+    /// Reasons for transcoding (e.g., "AudioCodecNotSupported")
+    pub transcode_reasons: Option<String>,
+
+    // --- Codec Negotiations (Comma-separated lists) ---
+    pub video_codec: Option<String>,
+    pub audio_codec: Option<String>,
+
+    // --- Quality & Bitrate ---
+    pub video_bitrate: Option<i64>,
+    pub audio_bitrate: Option<i64>,
+    pub max_framerate: Option<f32>,
+    pub max_width: Option<i32>,
+    pub max_height: Option<i32>,
+    pub transcoding_max_audio_channels: Option<i32>,
+    pub enable_audio_vbr_encoding: Option<bool>,
+
+    // --- HLS Segmenter Configuration ---
+    pub segment_container: Option<String>,
+    pub min_segments: Option<i32>,
+    pub break_on_non_key_frames: Option<bool>,
+    pub start_time_ticks: Option<i64>,
+
+    // --- Codec-Specific Capabilities (The hyphenated keys) ---
+
+    // H.264
+    #[serde(rename = "h264-profile")]
+    pub h264_profile: Option<String>,
+    #[serde(rename = "h264-level")]
+    pub h264_level: Option<i32>,
+    #[serde(rename = "h264-videobitdepth")]
+    pub h264_bit_depth: Option<i32>,
+    #[serde(rename = "h264-rangetype")]
+    pub h264_range_type: Option<String>,
+    #[serde(rename = "h264-deinterlace")]
+    pub h264_deinterlace: Option<bool>,
+    pub require_avc: Option<bool>,
+
+    // HEVC
+    #[serde(rename = "hevc-profile")]
+    pub hevc_profile: Option<String>,
+    #[serde(rename = "hevc-level")]
+    pub hevc_level: Option<i32>,
+    #[serde(rename = "hevc-rangetype")]
+    pub hevc_range_type: Option<String>,
+    #[serde(rename = "hevc-deinterlace")]
+    pub hevc_deinterlace: Option<bool>,
+
+    // AV1
+    #[serde(rename = "av1-profile")]
+    pub av1_profile: Option<String>,
+    #[serde(rename = "av1-level")]
+    pub av1_level: Option<i32>,
+    #[serde(rename = "av1-rangetype")]
+    pub av1_range_type: Option<String>,
+
+    // VP9
+    #[serde(rename = "vp9-rangetype")]
+    pub vp9_range_type: Option<String>,
+
+    // --- Logic Flags ---
+    pub allow_video_stream_copy: Option<bool>,
+    pub allow_audio_stream_copy: Option<bool>,
+}
