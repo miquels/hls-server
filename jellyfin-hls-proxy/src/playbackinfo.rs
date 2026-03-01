@@ -10,20 +10,6 @@ use crate::AppState;
 
 use crate::types::{PlaybackInfoRequest, PlaybackInfoResponse};
 
-// TODO:
-// - playback_info_handler should decode the POST request into PlaybackInfoRequest.
-// - it should then POST this to the remote jellyfin server.
-//
-// - The response it gets should be decoded into PlaybackInfoResponse
-// - This PlaybackInfoResponse should then be sent back to the client.
-//
-// This might need splitting up playback_info_handler in two, one that handles
-// POST and one that handles GET requests.
-//
-// Then, mutate_playback_info_request and mutate_playback_info_response should
-// mutate the PlaybackInfoRequest data and the PlaybackInfoResponse data
-// instead of mangling JSON as they do now.
-//
 pub async fn playback_info_handler(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(_item_id): axum::extract::Path<String>,
@@ -33,14 +19,23 @@ pub async fn playback_info_handler(
     body: Bytes,
 ) -> Result<Response, StatusCode> {
     tracing::info!("PlaybackInfo request received: {} {}", method, uri.path());
-    tracing::info!("Read PlaybackInfo body: {} bytes", body.len());
+    // 1. Decode request
+    let mut req_data: PlaybackInfoRequest = if body.is_empty() {
+        PlaybackInfoRequest::default()
+    } else {
+        serde_json::from_slice(&body).unwrap_or_else(|e| {
+            tracing::warn!(
+                "Failed to decode PlaybackInfo request: {}, using default",
+                e
+            );
+            PlaybackInfoRequest::default()
+        })
+    };
 
-    let mut json: serde_json::Value =
-        serde_json::from_slice(&body).unwrap_or_else(|_| serde_json::json!({}));
+    // 2. Mutate request
+    mutate_playback_info_request(&mut req_data);
 
-    mutate_playback_info_request(&mut json);
-
-    let modified_body = serde_json::to_vec(&json).unwrap();
+    let modified_body = serde_json::to_vec(&req_data).unwrap();
 
     let path_query = uri
         .path_and_query()
@@ -96,17 +91,21 @@ pub async fn playback_info_handler(
             tracing::error!("Failed to read PlaybackInfo upstream body: {}", e);
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
-        tracing::info!(
-            "Read PlaybackInfo upstream body: {} bytes",
-            resp_body_bytes.len()
-        );
 
-        let mut resp_json: serde_json::Value =
-            serde_json::from_slice(&resp_body_bytes).unwrap_or_else(|_| serde_json::json!({}));
+        // 3. Decode response
+        let mut resp_data: PlaybackInfoResponse = serde_json::from_slice(&resp_body_bytes)
+            .unwrap_or_else(|e| {
+                tracing::warn!(
+                    "Failed to decode PlaybackInfo response: {}, returning default",
+                    e
+                );
+                PlaybackInfoResponse::default()
+            });
 
-        mutate_playback_info_response(&mut resp_json);
+        // 4. Mutate response
+        mutate_playback_info_response(&mut resp_data);
 
-        let modified_resp_body = serde_json::to_vec(&resp_json).unwrap();
+        let modified_resp_body = serde_json::to_vec(&resp_data).unwrap();
 
         if let Some(resp_headers) = response_builder.headers_mut() {
             resp_headers.insert(
@@ -144,51 +143,38 @@ pub async fn playback_info_handler(
     })
 }
 
-fn mutate_playback_info_request(json: &mut serde_json::Value) {
-    if !json.is_object() {
-        return;
-    }
-    let dp_profile = serde_json::json!({
-        "Container": "mp4,m4v,mkv,webm",
-        "VideoCodec": "h264,h265,vp9",
-        "AudioCodec": "aac,mp3,ac3,eac3,opus",
-        "Type": "Video"
-    });
+fn mutate_playback_info_request(req: &mut PlaybackInfoRequest) {
+    let dp_profile = crate::types::DirectPlayProfile {
+        container: Some("mp4,m4v,mkv,webm".to_string()),
+        video_codec: Some("h264,h265,vp9".to_string()),
+        audio_codec: Some("aac,mp3,ac3,eac3,opus".to_string()),
+        profile_type: "Video".to_string(),
+    };
 
-    if let Some(device_profile) = json
-        .get_mut("DeviceProfile")
-        .and_then(|v| v.as_object_mut())
-    {
-        device_profile.insert(
-            "DirectPlayProfiles".to_string(),
-            serde_json::json!([dp_profile]),
-        );
-        device_profile.insert("TranscodingProfiles".to_string(), serde_json::json!([]));
+    if let Some(device_profile) = req.device_profile.as_mut() {
+        device_profile.direct_play_profiles = vec![dp_profile];
+        device_profile.transcoding_profiles = vec![];
     } else {
-        json["DeviceProfile"] = serde_json::json!({
-            "DirectPlayProfiles": [dp_profile],
-            "TranscodingProfiles": []
+        req.device_profile = Some(crate::types::DeviceProfile {
+            direct_play_profiles: vec![dp_profile],
+            transcoding_profiles: vec![],
+            ..Default::default()
         });
     }
 }
 
-fn mutate_playback_info_response(json: &mut serde_json::Value) {
-    if let Some(media_sources) = json.get_mut("MediaSources").and_then(|v| v.as_array_mut()) {
-        for source in media_sources.iter_mut() {
-            if let Some(path) = source.get("Path").and_then(|v| v.as_str()) {
-                let clean_path = path.trim_start_matches('/');
-                let transcode_url =
-                    format!("/proxymedia/{}.as.m3u8", urlencoding::encode(clean_path));
+fn mutate_playback_info_response(resp: &mut PlaybackInfoResponse) {
+    for source in resp.media_sources.iter_mut() {
+        let clean_path = source.path.trim_start_matches('/');
+        let transcode_url = format!("/proxymedia/{}.as.m3u8", urlencoding::encode(clean_path));
 
-                source["TranscodingUrl"] = serde_json::json!(transcode_url);
-                source["TranscodingSubProtocol"] = serde_json::json!("hls");
-                source["TranscodingContainer"] = serde_json::json!("ts");
+        source.transcoding_url = Some(transcode_url);
+        source.transcoding_sub_protocol = Some("hls".to_string());
+        source.transcoding_container = Some("ts".to_string());
 
-                source["SupportsDirectPlay"] = serde_json::json!(false);
-                source["SupportsDirectStream"] = serde_json::json!(false);
-                source["SupportsTranscoding"] = serde_json::json!(true);
-            }
-        }
+        source.supports_direct_play = false;
+        source.supports_direct_stream = false;
+        source.supports_transcoding = true;
     }
 }
 
@@ -198,48 +184,45 @@ mod tests {
 
     #[test]
     fn test_mutate_playback_info_request() {
-        let mut json = serde_json::json!({
-            "DeviceProfile": {
-                "TranscodingProfiles": [{"Container": "mp3"}],
-                "DirectPlayProfiles": []
-            }
-        });
-        mutate_playback_info_request(&mut json);
-        let device_profile = &json["DeviceProfile"];
-        assert_eq!(
-            device_profile["TranscodingProfiles"]
-                .as_array()
-                .unwrap()
-                .len(),
-            0
-        );
-        assert_eq!(
-            device_profile["DirectPlayProfiles"]
-                .as_array()
-                .unwrap()
-                .len(),
-            1
-        );
-        let dp = &device_profile["DirectPlayProfiles"][0];
-        assert_eq!(dp["VideoCodec"], "h264,h265,vp9");
+        let mut req = PlaybackInfoRequest {
+            device_profile: Some(crate::types::DeviceProfile {
+                transcoding_profiles: vec![crate::types::TranscodingProfile {
+                    container: Some("mp3".to_string()),
+                    profile_type: "Audio".to_string(),
+                    video_codec: None,
+                    audio_codec: Some("mp3".to_string()),
+                    protocol: "http".to_string(),
+                    context: "Streaming".to_string(),
+                }],
+                direct_play_profiles: vec![],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        mutate_playback_info_request(&mut req);
+        let device_profile = req.device_profile.as_ref().unwrap();
+        assert_eq!(device_profile.transcoding_profiles.len(), 0);
+        assert_eq!(device_profile.direct_play_profiles.len(), 1);
+        let dp = &device_profile.direct_play_profiles[0];
+        assert_eq!(dp.video_codec.as_deref(), Some("h264,h265,vp9"));
     }
 
     #[test]
     fn test_mutate_playback_info_response() {
-        let mut json = serde_json::json!({
-            "MediaSources": [
-                {
-                    "Path": "/some/media/file.mp4"
-                }
-            ]
-        });
-        mutate_playback_info_response(&mut json);
-        let media_sources = &json["MediaSources"][0];
-        assert_eq!(media_sources["SupportsDirectPlay"].as_bool(), Some(false));
-        assert_eq!(media_sources["SupportsTranscoding"].as_bool(), Some(true));
+        let mut resp = PlaybackInfoResponse {
+            media_sources: vec![crate::types::MediaSource {
+                path: "/some/media/file.mp4".to_string(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        mutate_playback_info_response(&mut resp);
+        let media_source = &resp.media_sources[0];
+        assert_eq!(media_source.supports_direct_play, false);
+        assert_eq!(media_source.supports_transcoding, true);
         assert_eq!(
-            media_sources["TranscodingUrl"].as_str().unwrap(),
-            "/proxymedia/some%2Fmedia%2Ffile.mp4.as.m3u8"
+            media_source.transcoding_url.as_deref(),
+            Some("/proxymedia/some%2Fmedia%2Ffile.mp4.as.m3u8")
         );
     }
 }

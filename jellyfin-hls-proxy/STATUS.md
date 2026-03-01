@@ -69,3 +69,11 @@
 - Added a new command line option `--mediaroot <directory>` to allow prepending a base path to all media resources.
 - Updated `proxymedia_handler` to correctly join the provided root with the intercepted media path.
 - Verified the implementation with debug logs showing successful path prefixing.
+
+## Milestone 8: Typed PlaybackInfo Hub
+**Status**: Completed
+
+**Summary:**
+- Refactored `playback_info_handler` to use strongly-typed `PlaybackInfoRequest` and `PlaybackInfoResponse` structs instead of raw JSON manipulation.
+- Updated `mutate_playback_info_request` and `mutate_playback_info_response` to operate on These typed structures.
+- Verified the refactor with unit tests (2 passed) ensuring parity with the previous logic.
