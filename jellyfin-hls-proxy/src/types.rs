@@ -329,8 +329,6 @@ pub struct MediaStream {
     pub is_interleaved: Option<bool>,
 }
 
-use serde::{Deserialize, Serialize};
-
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "PascalCase")]
 pub struct HlsTranscodingParameters {

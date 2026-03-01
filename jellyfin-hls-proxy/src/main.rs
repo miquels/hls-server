@@ -1,7 +1,4 @@
-use axum::{
-    routing::any,
-    Router,
-};
+use axum::{routing::any, Router};
 use clap::Parser;
 use reqwest::Client;
 use std::sync::Arc;
@@ -16,7 +13,7 @@ pub mod types;
 
 use hls::proxymedia_handler;
 use playbackinfo::playback_info_handler;
-use proxy::proxy_handler;
+use proxy::{proxy_handler, websocket_handler};
 
 #[derive(Parser, Debug, Clone)]
 #[command(author, version, about, long_about = None)]
@@ -73,6 +70,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "/proxymedia/{*path}",
             axum::routing::get(proxymedia_handler),
         )
+        .route("/socket", axum::routing::get(websocket_handler))
         .fallback(any(proxy_handler))
         .layer(CorsLayer::permissive())
         .layer(

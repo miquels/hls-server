@@ -40,7 +40,7 @@
 //!     // Generate playlist or segments.
 //!     hls_video.generate()
 //! }
-//! ```ignore
+//! ```
 //!
 //! If you are using an async server such as Axum, you should wrap `HlsVideo::open`
 //! and `hls_video.generate()` in calls to `tokio::task::spawn_blocking()`.

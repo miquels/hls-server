@@ -285,7 +285,9 @@ pub(crate) fn get_stream_by_id(stream_id: &str) -> Option<std::sync::Arc<StreamI
 }
 
 /// Remove a tracked media stream by its generated stream ID
-pub fn remove_stream_by_id(stream_id: &str) {
+///
+/// Returns true if the stream was found and removed, false otherwise.
+pub fn remove_stream_by_id(stream_id: &str) -> bool {
     if let Some(_media) = STREAMS_BY_ID
         .get_or_init(dashmap::DashMap::new)
         .remove(stream_id)
@@ -293,7 +295,9 @@ pub fn remove_stream_by_id(stream_id: &str) {
         if let Some(c) = crate::cache::segment_cache() {
             c.remove_stream(stream_id);
         }
+        return true;
     }
+    false
 }
 
 /// Active stream metadata

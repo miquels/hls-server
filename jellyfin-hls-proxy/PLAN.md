@@ -23,6 +23,13 @@ This document outlines the implementation plan for the Jellyfin HLS reverse prox
 - Clear out the `TranscodingProfiles` list to force Jellyfin to rely on the proxy's DirectPlay/Transmuxing capabilities.
 - Forward the mutated JSON body to the Jellyfin backend.
 
+### Milestone 9: TODO Implementation
+*Goal: Complete pending tasks from TODO.md (Safari H.265, TranscodingUrl rewriting, Transparent Proxy/WebSockets).*
+- **Safari H.265 Support**: Check User-Agent and append `h265` to direct play profiles for Safari. Disable `ts` container transcoding for all.
+- **TranscodingUrl Rewriting**: Decode URL from Jellyfin response, deserialize parameters via `serde_urlencoded` and `url` crates, and appropriately encode them into our `/proxymedia/` URL structure.
+- **Transparent Proxy**: Introduce request body streaming instead of memory buffering in `proxy_handler`.
+- **WebSocket Route**: Add `tokio-tungstenite` proxying for the `/socket` route to support bi-directional realtime features of Jellyfin.
+
 ### Milestone 3: Processing PlaybackInfo Responses
 *Goal: Parse the Jellyfin backend response and rewrite media URLs to point to our transmuxing proxy endpoints.*
 - Receive the `PlaybackInfo` JSON response from the Jellyfin backend.

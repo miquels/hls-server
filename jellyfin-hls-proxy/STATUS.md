@@ -77,3 +77,22 @@
 - Refactored `playback_info_handler` to use strongly-typed `PlaybackInfoRequest` and `PlaybackInfoResponse` structs instead of raw JSON manipulation.
 - Updated `mutate_playback_info_request` and `mutate_playback_info_response` to operate on These typed structures.
 - Verified the refactor with unit tests (2 passed) ensuring parity with the previous logic.
+
+## Milestone 9: TODO Implementation
+**Status**: Completed
+
+**Summary:**
+- Added Safari H.265 detection to `mutate_playback_info_request`, injecting the `h265` codec into DirectPlay profiles for Safari clients.
+- Disabled `ts` container transcoding globally to enforce proxy functionality.
+- Adapted `mutate_playback_info_response` to decode Jellyfin's `TranscodingUrl` query string into our `HlsTranscodingParameters` struct and extract the appropriate `codecs` and `tracks` for our `/proxymedia` HLS proxy endpoints.
+- Updated `proxy_handler` to utilize asynchronous request body streaming instead of holding entire payloads in memory blockingly.
+- Added a `websocket_handler` utilizing `tokio-tungstenite` to transparently stream and maintain the WebSocket `/socket` connection between client and Jellyfin directly.
+
+## Milestone 10: Session Management
+**Status**: Completed
+
+**Summary:**
+- Configured `mutate_playback_info_response` to forward `play_session_id` as the `stream_id` parameter to the proxymedia endpoints.
+- Patched `proxymedia_handler` to read the `stream_id` parameter and correctly hydrate `hls_url.session_id`.
+- Intercepted the `DELETE /Videos/ActiveEncodings` request within `proxy.rs`, pulling out the `playSessionId` query variable.
+- Invoked `hls_vod_lib::cache::remove_stream_by_id(session_id)` to gracefully clear active encoding tracking when playback is stopped early, returning `200 OK` on success, or appropriately falling back to the default proxy otherwise.

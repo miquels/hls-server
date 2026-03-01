@@ -1,9 +1,4 @@
-use axum::{
-    body::Body,
-    extract::State,
-    http::StatusCode,
-    response::Response,
-};
+use axum::{body::Body, extract::State, http::StatusCode, response::Response};
 use std::sync::Arc;
 
 use crate::AppState;
@@ -23,13 +18,17 @@ pub async fn proxymedia_handler(
     }
 
     // Fallback to removing the leading slash if parsing fails (for the relative paths)
-    let hls_url = match hls_vod_lib::HlsParams::parse(&clean_path) {
+    let mut hls_url = match hls_vod_lib::HlsParams::parse(&clean_path) {
         Some(params) => params,
         None => hls_vod_lib::HlsParams::parse(&path).ok_or_else(|| {
             tracing::error!("Invalid HLS request: {}", path);
             StatusCode::BAD_REQUEST
         })?,
     };
+
+    if let Some(stream_id) = query_params.get("stream_id") {
+        hls_url.session_id = Some(stream_id.clone());
+    }
 
     tracing::info!("Parsed HLS URL: {:?}", hls_url);
 
@@ -77,13 +76,8 @@ pub async fn proxymedia_handler(
                 p.enable_tracks(&tracks);
             }
 
-            if query_params
-                .get("interleave")
-                .map(|v| v == "true" || v == "1")
-                .unwrap_or(false)
-            {
-                p.interleave();
-            }
+            // Always use interleaving.
+            p.interleave();
         }
 
         let mut headers = axum::http::HeaderMap::new();
