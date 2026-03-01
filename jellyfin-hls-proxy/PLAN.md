@@ -40,10 +40,15 @@ This document outlines the implementation plan for the Jellyfin HLS reverse prox
 - Adapt the handler logic from `hls-vod-server/src/http/dynamic.rs` to plug the Axum request context into the `hls_vod_lib` backend.
 - Ensure all transmuxing (and audio-to-aac transcoding) is handled purely by `hls-vod-lib` without shelling out to raw `ffmpeg` command lines.
 
-### Milestone 5: Polish & Testing
-*Goal: Ensure stability, proper error handling, testing, and performance.*
-- Add proper structured logging (`tracing`) for incoming requests, proxied requests, and HLS segment generation times.
-- Verify audio/video interleaving and audio transcoding functionality.
-- Write unit tests for request mutation (Milestone 2 & 3).
-- Perform end-to-end testing with a real Jellyfin backend and web client. 
-- Graceful shutdown handling and configuration polishing.
+### Milestone 6: Bugfixes
+*Goal: Address critical connectivity and reliability issues.*
+- Resolve "Empty PlaybackInfo Reply" by stripping hop-by-hop headers (`Transfer-Encoding`, `Connection`).
+- Refactor handlers for robustness using Axum’s built-in extractors (`Bytes`, `Method`, `Uri`).
+- Improve request/response mutation safety with defensive JSON handling.
+
+### Milestone 7: --mediaroot support
+*Goal: Allow users to specify a filesystem prefix for media resources.*
+- Add `--mediaroot <directory>` to the CLI arguments via `clap`.
+- Update `AppState` to store the media root.
+- Prepend the media root to incoming media paths in `proxymedia_handler` before passing them to `HlsVideo::open`.
+- Verify correctness with absolute and relative paths.

@@ -51,3 +51,21 @@
 - Brought in `tower_http::trace::TraceLayer` and applied it to the Axum Router to provide detailed, structured HTTP request/response logging via `tracing`.
 - Created basic unit/integration tests to guarantee that device profiles are correctly injected before hitting Jellyfin, and that the server correctly maps responses to the `TranscodingUrl`.
 - Verified the build via `cargo check` and `cargo test`, successfully passing all assertions and effectively finishing the proxy implementation.
+
+## Milestone 6: Bugfix - Empty PlaybackInfo Reply
+**Status**: Completed
+
+**Summary:**
+- Fixed a "Connection Drop / Empty Reply" issue on `POST /PlaybackInfo`.
+- The root cause was identified as `hyper` (the underlying HTTP library) aborting the response because the proxy was merging upstream `Transfer-Encoding: chunked` headers with a manually calculated `Content-Length` for the mutated JSON.
+- Implemented a robust "hop-by-hop" header stripping mechanism in the proxy handler to ensure standard-compliant HTTP responses.
+- Refactored `playback_info_handler` to use Axum extractors (`Bytes`, `Method`, `Uri`) and added defensive JSON parsing to handle various client request shapes safely.
+- Verified the fix with the user's reproduction `curl` command, successfully receiving the mutated JSON.
+
+## Milestone 7: --mediaroot support
+**Status**: Completed
+
+**Summary:**
+- Added a new command line option `--mediaroot <directory>` to allow prepending a base path to all media resources.
+- Updated `proxymedia_handler` to correctly join the provided root with the intercepted media path.
+- Verified the implementation with debug logs showing successful path prefixing.

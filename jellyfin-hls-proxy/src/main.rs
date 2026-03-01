@@ -1,7 +1,7 @@
 use axum::{
-    body::Body,
+    body::{Body, Bytes},
     extract::{Request, State},
-    http::{uri::Uri, StatusCode},
+    http::{header::HeaderMap, method::Method, uri::Uri, StatusCode},
     response::Response,
     routing::any,
     Router,
@@ -9,47 +9,73 @@ use axum::{
 use clap::Parser;
 use reqwest::Client;
 use std::sync::Arc;
-use tower_http::trace::TraceLayer;
+use tower_http::cors::CorsLayer;
+use tower_http::trace::{DefaultMakeSpan, DefaultOnRequest, DefaultOnResponse, TraceLayer};
+use tracing::Level;
 
 #[derive(Parser, Debug, Clone)]
 #[command(author, version, about, long_about = None)]
 struct Args {
     /// Jellyfin server URL to proxy to
-    #[arg(short, long, default_value = "http://127.0.0.1:8096")]
+    #[arg(short, long, default_value = "http://jf.high5.nl:8096")]
     jellyfin_url: String,
 
     /// Listen address
     #[arg(short, long, default_value = "127.0.0.1:8097")]
     listen: String,
+
+    /// Media root directory to prepend to filesystem paths
+    #[arg(short, long, default_value = "")]
+    mediaroot: String,
 }
 
 struct AppState {
     jellyfin_url: String,
+    media_root: String,
     http_client: Client,
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tracing_subscriber::fmt::init();
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "jellyfin_hls_proxy=info,tower_http=info".into()),
+        )
+        .init();
 
     let args = Args::parse();
 
     // Normalize jellyfin URL (remove trailing slash)
     let jellyfin_url = args.jellyfin_url.trim_end_matches('/').to_string();
 
+    let http_client = Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()?;
+
     let state = Arc::new(AppState {
         jellyfin_url,
-        http_client: Client::new(),
+        media_root: args.mediaroot,
+        http_client,
     });
 
     let app = Router::new()
         .route(
-            "/Items/:item_id/PlaybackInfo",
+            "/Items/{item_id}/PlaybackInfo",
             axum::routing::post(playback_info_handler),
         )
-        .route("/proxymedia/*path", axum::routing::get(proxymedia_handler))
+        .route(
+            "/proxymedia/{*path}",
+            axum::routing::get(proxymedia_handler),
+        )
         .fallback(any(proxy_handler))
-        .layer(TraceLayer::new_for_http())
+        .layer(CorsLayer::permissive())
+        .layer(
+            TraceLayer::new_for_http()
+                .make_span_with(DefaultMakeSpan::new().level(Level::INFO))
+                .on_request(DefaultOnRequest::new().level(Level::INFO))
+                .on_response(DefaultOnResponse::new().level(Level::INFO)),
+        )
         .with_state(state);
 
     let addr: std::net::SocketAddr = args.listen.parse()?;
@@ -75,10 +101,22 @@ async fn proxy_handler(
         .unwrap_or(path);
 
     let uri = format!("{}{}", state.jellyfin_url, path_query);
+    let uri_str = uri.clone();
+    tracing::info!(
+        "Proxying {} {} to {}",
+        req.method(),
+        req.uri().path(),
+        uri_str
+    );
 
-    *req.uri_mut() = Uri::try_from(&uri).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    *req.uri_mut() = Uri::try_from(&uri).map_err(|_| {
+        tracing::error!("Invalid URI for proxy: {}", uri_str);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
-    let mut proxy_req = state.http_client.request(req.method().clone(), uri.clone());
+    let mut proxy_req = state
+        .http_client
+        .request(req.method().clone(), uri_str.clone());
 
     // Copy headers
     for (name, value) in req.headers() {
@@ -94,9 +132,12 @@ async fn proxy_handler(
     proxy_req = proxy_req.body(body_bytes);
 
     let res = match proxy_req.send().await {
-        Ok(res) => res,
+        Ok(res) => {
+            tracing::info!("Upstream response for {}: {}", uri_str, res.status());
+            res
+        }
         Err(e) => {
-            tracing::error!("Proxy error: {}", e);
+            tracing::error!("Proxy error for {}: {}", uri_str, e);
             return Err(StatusCode::BAD_GATEWAY);
         }
     };
@@ -106,7 +147,28 @@ async fn proxy_handler(
     // Copy response headers
     if let Some(headers) = response_builder.headers_mut() {
         for (name, value) in res.headers() {
-            headers.insert(name.clone(), value.clone());
+            if name == reqwest::header::LOCATION {
+                if let Ok(loc_str) = value.to_str() {
+                    // Rewrite absolute upstream URLs to relative root URLs
+                    if loc_str.starts_with(&state.jellyfin_url) {
+                        let new_loc = loc_str.replace(&state.jellyfin_url, "");
+                        // Ensure it's not totally empty if it was exactly the root
+                        let new_loc = if new_loc.is_empty() {
+                            "/".to_string()
+                        } else {
+                            new_loc
+                        };
+                        if let Ok(new_val) = axum::http::HeaderValue::from_str(&new_loc) {
+                            headers.insert(name.clone(), new_val);
+                            continue;
+                        }
+                    }
+                }
+            }
+            // Strip hop-by-hop headers
+            if name != reqwest::header::TRANSFER_ENCODING && name != reqwest::header::CONNECTION {
+                headers.insert(name.clone(), value.clone());
+            }
         }
     }
 
@@ -114,42 +176,44 @@ async fn proxy_handler(
     let stream = res.bytes_stream();
     let body = Body::from_stream(stream);
 
-    response_builder
-        .body(body)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+    response_builder.body(body).map_err(|e| {
+        tracing::error!("Response building error in proxy: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })
 }
 
 async fn playback_info_handler(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(_item_id): axum::extract::Path<String>,
-    req: Request,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Bytes,
 ) -> Result<Response, StatusCode> {
-    let parts = req.into_parts();
-
-    // Read the entire body
-    let body_bytes = axum::body::to_bytes(parts.1, usize::MAX)
-        .await
-        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    tracing::info!("PlaybackInfo request received: {} {}", method, uri.path());
+    tracing::info!("Read PlaybackInfo body: {} bytes", body.len());
 
     let mut json: serde_json::Value =
-        serde_json::from_slice(&body_bytes).unwrap_or_else(|_| serde_json::json!({}));
+        serde_json::from_slice(&body).unwrap_or_else(|_| serde_json::json!({}));
 
     mutate_playback_info_request(&mut json);
 
     let modified_body = serde_json::to_vec(&json).unwrap();
 
-    let path_query = parts
-        .0
-        .uri
+    let path_query = uri
         .path_and_query()
         .map(|v| v.as_str())
-        .unwrap_or(parts.0.uri.path());
-    let uri = format!("{}{}", state.jellyfin_url, path_query);
+        .unwrap_or(uri.path());
+    let upstream_uri = format!("{}{}", state.jellyfin_url, path_query);
+    tracing::info!("Proxying PlaybackInfo to {}", upstream_uri);
 
-    let mut proxy_req = state.http_client.request(parts.0.method.clone(), uri);
+    let mut proxy_req = state.http_client.request(method, upstream_uri.clone());
 
-    for (name, value) in parts.0.headers.iter() {
-        if name != reqwest::header::HOST && name != reqwest::header::CONTENT_LENGTH {
+    for (name, value) in headers.iter() {
+        if name != reqwest::header::HOST
+            && name != reqwest::header::CONTENT_LENGTH
+            && name != reqwest::header::ACCEPT_ENCODING
+        {
             proxy_req = proxy_req.header(name, value);
         }
     }
@@ -160,9 +224,10 @@ async fn playback_info_handler(
     proxy_req = proxy_req.body(modified_body);
 
     let res = proxy_req.send().await.map_err(|e| {
-        tracing::error!("Proxy error in PlaybackInfo: {}", e);
+        tracing::error!("Proxy error in PlaybackInfo for {}: {}", upstream_uri, e);
         StatusCode::BAD_GATEWAY
     })?;
+    tracing::info!("PlaybackInfo upstream response: {}", res.status());
 
     let mut response_builder = Response::builder().status(res.status());
     let is_json = res
@@ -172,54 +237,73 @@ async fn playback_info_handler(
         .map(|v| v.contains("application/json"))
         .unwrap_or(false);
 
-    if let Some(headers) = response_builder.headers_mut() {
+    if let Some(resp_headers) = response_builder.headers_mut() {
         for (name, value) in res.headers() {
-            if name != reqwest::header::CONTENT_LENGTH {
-                headers.insert(name.clone(), value.clone());
+            if name != reqwest::header::CONTENT_LENGTH
+                && name != reqwest::header::CONTENT_ENCODING
+                && name != reqwest::header::TRANSFER_ENCODING
+                && name != reqwest::header::CONNECTION
+            {
+                resp_headers.insert(name.clone(), value.clone());
             }
         }
     }
 
     if is_json && res.status().is_success() {
-        let body_bytes = res
-            .bytes()
-            .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        let mut json: serde_json::Value =
-            serde_json::from_slice(&body_bytes).unwrap_or_else(|_| serde_json::json!({}));
+        let resp_body_bytes = res.bytes().await.map_err(|e| {
+            tracing::error!("Failed to read PlaybackInfo upstream body: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+        tracing::info!(
+            "Read PlaybackInfo upstream body: {} bytes",
+            resp_body_bytes.len()
+        );
 
-        mutate_playback_info_response(&mut json);
+        let mut resp_json: serde_json::Value =
+            serde_json::from_slice(&resp_body_bytes).unwrap_or_else(|_| serde_json::json!({}));
 
-        let modified_body = serde_json::to_vec(&json).unwrap();
+        mutate_playback_info_response(&mut resp_json);
 
-        if let Some(headers) = response_builder.headers_mut() {
-            headers.insert(
-                reqwest::header::CONTENT_LENGTH,
-                modified_body.len().to_string().parse().unwrap(),
+        let modified_resp_body = serde_json::to_vec(&resp_json).unwrap();
+
+        if let Some(resp_headers) = response_builder.headers_mut() {
+            resp_headers.insert(
+                axum::http::header::CONTENT_LENGTH,
+                axum::http::HeaderValue::from(modified_resp_body.len()),
             );
         }
 
+        tracing::info!(
+            "Returning mutated PlaybackInfo response, size: {}",
+            modified_resp_body.len()
+        );
+
         return response_builder
-            .body(Body::from(modified_body))
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR);
+            .body(Body::from(modified_resp_body))
+            .map_err(|e| {
+                tracing::error!("Response building error in PlaybackInfo branch: {}", e);
+                StatusCode::INTERNAL_SERVER_ERROR
+            });
     }
 
     let content_len = res.headers().get(reqwest::header::CONTENT_LENGTH).cloned();
     if let Some(len) = content_len {
-        if let Some(headers) = response_builder.headers_mut() {
-            headers.insert(reqwest::header::CONTENT_LENGTH, len);
+        if let Some(resp_headers) = response_builder.headers_mut() {
+            resp_headers.insert(reqwest::header::CONTENT_LENGTH, len);
         }
     }
 
     let stream = res.bytes_stream();
     let body = Body::from_stream(stream);
 
-    response_builder
-        .body(body)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+    response_builder.body(body).map_err(|e| {
+        tracing::error!("Response building error in PlaybackInfo fallback: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })
 }
 
 async fn proxymedia_handler(
+    State(state): State<Arc<AppState>>,
     axum::extract::Path(path): axum::extract::Path<String>,
     axum::extract::Query(query_params): axum::extract::Query<
         std::collections::HashMap<String, String>,
@@ -243,7 +327,20 @@ async fn proxymedia_handler(
 
     tracing::info!("Parsed HLS URL: {:?}", hls_url);
 
-    let media_path = std::path::PathBuf::from(&hls_url.video_url);
+    let mut media_path = std::path::PathBuf::from(&hls_url.video_url);
+
+    // If media_root is set, prepend it to the path
+    if !state.media_root.is_empty() {
+        let root = std::path::Path::new(&state.media_root);
+        // We want to join them. If hls_url.video_url starts with /, we might need to be careful
+        // depending on if we want it to be relative to root.
+        // Usually joining an absolute path with another path makes it absolute.
+        // Let's trim leading slash if we have a root.
+        let video_url = hls_url.video_url.trim_start_matches('/');
+        media_path = root.join(video_url);
+        tracing::info!("Prepended media_root: {:?}", media_path);
+    }
+
     if !media_path.exists() {
         tracing::error!("Media file not found: {:?}", media_path);
         return Err(StatusCode::NOT_FOUND);
@@ -307,6 +404,9 @@ async fn proxymedia_handler(
 }
 
 fn mutate_playback_info_request(json: &mut serde_json::Value) {
+    if !json.is_object() {
+        return;
+    }
     let dp_profile = serde_json::json!({
         "Container": "mp4,m4v,mkv,webm",
         "VideoCodec": "h264,h265,vp9",
@@ -314,9 +414,15 @@ fn mutate_playback_info_request(json: &mut serde_json::Value) {
         "Type": "Video"
     });
 
-    if let Some(device_profile) = json.get_mut("DeviceProfile") {
-        device_profile["DirectPlayProfiles"] = serde_json::json!([dp_profile]);
-        device_profile["TranscodingProfiles"] = serde_json::json!([]);
+    if let Some(device_profile) = json
+        .get_mut("DeviceProfile")
+        .and_then(|v| v.as_object_mut())
+    {
+        device_profile.insert(
+            "DirectPlayProfiles".to_string(),
+            serde_json::json!([dp_profile]),
+        );
+        device_profile.insert("TranscodingProfiles".to_string(), serde_json::json!([]));
     } else {
         json["DeviceProfile"] = serde_json::json!({
             "DirectPlayProfiles": [dp_profile],
