@@ -20,3 +20,14 @@
 - Automatically injected a custom `DirectPlayProfile` for all standard containers (`"mp4,m4v,mkv,webm"`) and codecs (`"h264,h265,vp9"` / `"aac,mp3,ac3,eac3,opus"`).
 - Explicitly cleared out the `TranscodingProfiles` to force Jellyfin to rely on the proxy.
 - Forwarded the modified request downstream to the backend.
+
+## Milestone 3: Processing PlaybackInfo Responses
+**Status**: Completed
+
+**Summary:**
+- Intercepted the downstream Jellyfin JSON response in the `playback_info_handler`.
+- Parsed the Jellyfin device capability evaluation to locate the `MediaSources` array.
+- Extracted the physical file `Path` for each media source.
+- Generated a mapped proxy `TranscodingUrl` (`/proxymedia/master.m3u8?file={encoded_path}`) that points to our standalone HLS handlers.
+- Modified proxy response indicating that `TranscodingContainer` is `ts` (to mimic standard behavior) and set `SupportsTranscoding` to `true`, forcing the Jellyfin client to use our server for streaming.
+- Successfully repacked and returned the modified JSON body with adjusted `CONTENT_LENGTH` to the requesting client.

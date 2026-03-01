@@ -177,9 +177,64 @@ async fn playback_info_handler(
     })?;
 
     let mut response_builder = Response::builder().status(res.status());
+    let is_json = res
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.contains("application/json"))
+        .unwrap_or(false);
+
     if let Some(headers) = response_builder.headers_mut() {
         for (name, value) in res.headers() {
-            headers.insert(name.clone(), value.clone());
+            if name != reqwest::header::CONTENT_LENGTH {
+                headers.insert(name.clone(), value.clone());
+            }
+        }
+    }
+
+    if is_json && res.status().is_success() {
+        let body_bytes = res
+            .bytes()
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let mut json: serde_json::Value =
+            serde_json::from_slice(&body_bytes).unwrap_or_else(|_| serde_json::json!({}));
+
+        if let Some(media_sources) = json.get_mut("MediaSources").and_then(|v| v.as_array_mut()) {
+            for source in media_sources.iter_mut() {
+                if let Some(path) = source.get("Path").and_then(|v| v.as_str()) {
+                    let encoded_path = urlencoding::encode(path);
+                    let transcode_url = format!("/proxymedia/master.m3u8?file={}", encoded_path);
+
+                    source["TranscodingUrl"] = serde_json::json!(transcode_url);
+                    source["TranscodingSubProtocol"] = serde_json::json!("hls");
+                    source["TranscodingContainer"] = serde_json::json!("ts");
+
+                    source["SupportsDirectPlay"] = serde_json::json!(false);
+                    source["SupportsDirectStream"] = serde_json::json!(false);
+                    source["SupportsTranscoding"] = serde_json::json!(true);
+                }
+            }
+        }
+
+        let modified_body = serde_json::to_vec(&json).unwrap();
+
+        if let Some(headers) = response_builder.headers_mut() {
+            headers.insert(
+                reqwest::header::CONTENT_LENGTH,
+                modified_body.len().to_string().parse().unwrap(),
+            );
+        }
+
+        return response_builder
+            .body(Body::from(modified_body))
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    let content_len = res.headers().get(reqwest::header::CONTENT_LENGTH).cloned();
+    if let Some(len) = content_len {
+        if let Some(headers) = response_builder.headers_mut() {
+            headers.insert(reqwest::header::CONTENT_LENGTH, len);
         }
     }
 
