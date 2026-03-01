@@ -1,0 +1,30 @@
+[package]
+name = "jellyfin-hls-proxy"
+version = "0.1.0"
+edition = "2021"
+description = "HLS transmuxing proxy for Jellyfin media server"
+license = "MIT"
+
+[dependencies]
+hls-vod-lib = { path = "../hls-vod-lib" }
+
+# Async runtime and HTTP server
+tokio = { version = "1.35", features = ["full"] }
+axum = { version = "0.8.8", features = ["macros"] }
+axum-server = "0.8"
+tower = { version = "0.5.3", features = ["util"] }
+tower-http = { version = "0.6.8", features = ["cors", "trace"] }
+serde_json = "1.0"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Utilities
+bytes = "1.11"
+
+# Configuration.
+serde = { version = "1.0", features = ["derive"] }
+toml = "0.8"
+clap = { version = "4.5", features = ["derive"] }
+reqwest = { version = "0.12", features = ["stream"] }

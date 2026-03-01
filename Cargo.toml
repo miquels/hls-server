@@ -2,6 +2,7 @@
 members = [
     "hls-vod-server",
     "hls-vod-lib",
+    "jellyfin-hls-proxy",
 ]
 resolver = "2"
 
