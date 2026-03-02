@@ -1,0 +1,30 @@
+# Jellyfin transmuxing proxy config file.
+
+# Server config.
+# At least one of http_listen_port or https_listen_port has to be present.
+[server]
+  # HTTP Listen port. Optional.
+  http_listen_port = 80
+
+  # HTTPS listen port. Optional.
+  https_listen_port = 443
+
+  # HTTPS certificate. optional if https_listen_port is not set.
+  tls_cert = "/etc/certs/example.crt"
+
+  # HTTPS private key. optional if https_listen_port is not set.
+  tls_key = "/etc/certs/example.key"
+
+# Special settings for Safari.
+[safari]
+  # Hack for safari.
+  force_transcoding = true
+
+# Settins for the Jellyfin server we proxy to.
+[jellyfin]
+  # Jellyfin server.
+  jellyfin = "https://jellyfin.somewhere.never"
+
+  # Media root. Optional (also a command line option).
+  mediaroot = "/media"
+

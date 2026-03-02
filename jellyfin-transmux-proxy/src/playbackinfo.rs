@@ -40,7 +40,7 @@ pub async fn playback_info_handler(
         .and_then(|h| h.to_str().ok());
 
     // 2. Mutate request
-    mutate_playback_info_request(&mut req_data, user_agent);
+    mutate_playback_info_request(&mut req_data, user_agent, state.safari_force_transcoding);
 
     println!(
         "XXX PlaybackInfo request decoded and mutated: \n{}",
@@ -165,7 +165,11 @@ fn profile_is(profile: &TranscodingProfile, container: &str) -> bool {
         && profile.container.as_deref() == Some(container)
 }
 
-fn mutate_playback_info_request(req: &mut PlaybackInfoRequest, user_agent: Option<&str>) {
+fn mutate_playback_info_request(
+    req: &mut PlaybackInfoRequest,
+    user_agent: Option<&str>,
+    safari_force_transcoding: bool,
+) {
     let device_profile = match req.device_profile.as_mut() {
         Some(device_profile) => device_profile,
         None => return,
@@ -194,7 +198,7 @@ fn mutate_playback_info_request(req: &mut PlaybackInfoRequest, user_agent: Optio
     let is_safari = user_agent.map_or(false, |ua| {
         ua.contains("Safari") && !ua.contains("Chrome") && !ua.contains("Chromium")
     });
-    if is_safari {
+    if is_safari && safari_force_transcoding {
         device_profile.direct_play_profiles = Vec::new();
     }
     println!("XXX device_profile: {:#?}", device_profile);
@@ -352,7 +356,7 @@ mod tests {
             }),
             ..Default::default()
         };
-        mutate_playback_info_request(&mut req, None);
+        mutate_playback_info_request(&mut req, None, true);
         let device_profile = req.device_profile.as_ref().unwrap();
         assert_eq!(device_profile.transcoding_profiles.len(), 2);
         assert_eq!(
@@ -381,7 +385,7 @@ mod tests {
             }),
             ..Default::default()
         };
-        mutate_playback_info_request(&mut req, Some("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15"));
+        mutate_playback_info_request(&mut req, Some("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15"), true);
         let device_profile = req.device_profile.as_ref().unwrap();
         assert_eq!(device_profile.direct_play_profiles.len(), 0);
     }
@@ -402,7 +406,7 @@ mod tests {
         assert_eq!(media_source.supports_direct_play, false);
         assert_eq!(
             media_source.transcoding_url.as_deref(),
-            Some("/proxymedia/some/media/file.mp4.as.m3u8?tracks=0")
+            Some("/proxymedia/some/media/file.mp4.as.m3u8?tracks=0&interleave=true")
         );
     }
 
@@ -420,7 +424,7 @@ mod tests {
         let media_source = &resp.media_sources[0];
         assert_eq!(
             media_source.transcoding_url.as_deref(),
-            Some("/proxymedia/movie.mkv.as.m3u8?codecs=h264,aac&stream_id=abcdef123&tracks=0,1")
+            Some("/proxymedia/movie.mkv.as.m3u8?codecs=h264,aac&stream_id=abcdef123&tracks=0,1&interleave=true")
         );
     }
 }
