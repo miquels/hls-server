@@ -269,7 +269,7 @@ fn rewrite_hls_url(
     proxy_query.push(format!("tracks={}", tracks.join(",")));
 
     // Generate an interleaved a/v stream.
-    proxy_query.push("interleave=true");
+    proxy_query.push("interleave=true".to_string());
 
     // Return new url.
     Ok(format!("{}?{}", transcode_url, proxy_query.join("&")))
