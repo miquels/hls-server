@@ -153,6 +153,36 @@ impl Fmp4Muxer {
         }
     }
 
+    /// Generate an init segment by writing multiple packets to force `moov` creation.
+    /// Essential for interleaved segments with streams like AC-3 that lack extradata
+    /// in the source container.
+    pub fn generate_init_segment_with_packets<'a, I>(&mut self, packets: I) -> Result<Vec<u8>>
+    where
+        I: IntoIterator<Item = &'a mut ffmpeg::Packet>,
+    {
+        let mut opts = ffmpeg::Dictionary::new();
+        opts.set("movflags", "empty_moov+default_base_moof+delay_moov");
+        opts.set("avoid_negative_ts", "0");
+
+        self.output
+            .write_header_with(opts)
+            .map_err(|e| FfmpegError::WriteError(format!("Failed to write header: {}", e)))?;
+
+        for packet in packets {
+            self.write_packet(packet)?;
+        }
+        let _ = self.output.write_trailer();
+
+        let full_data = self.writer.data();
+        self.writer.clear();
+
+        // Extract just ftyp + moov by finding the first media box
+        if let Some(offset) = find_media_segment_offset(&full_data) {
+            Ok(full_data[..offset].to_vec())
+        } else {
+            Ok(full_data)
+        }
+    }
     /// Write a packet
     pub fn write_packet(&mut self, packet: &mut ffmpeg::Packet) -> Result<()> {
         let stream_index = packet.stream();
@@ -633,6 +663,91 @@ mod tests {
         let init_data = muxer
             .generate_init_segment_with_packet(&mut pkt)
             .expect("Failed to generate AC3 init segment");
+
+        assert!(!init_data.is_empty(), "Init segment should not be empty");
+        let box_type = &init_data[4..8];
+        assert_eq!(box_type, b"ftyp", "Init segment should start with ftyp");
+    }
+
+    #[test]
+    fn test_mux_av_ac3_header() {
+        ffmpeg::init().unwrap();
+        let mut muxer = Fmp4Muxer::new().unwrap();
+
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("testvideos")
+            .join("bun33s.mp4");
+
+        if !path.exists() {
+            return;
+        }
+
+        let mut input = ffmpeg::format::input(&path).unwrap();
+        let video_stream = input
+            .streams()
+            .find(|s| s.parameters().medium() == ffmpeg::media::Type::Video)
+            .expect("No video stream");
+        let aac_stream = input
+            .streams()
+            .find(|s| s.parameters().medium() == ffmpeg::media::Type::Audio)
+            .expect("No audio stream in test video");
+
+        let mut audio_params = aac_stream.parameters();
+        let video_params = video_stream.parameters();
+
+        crate::ffmpeg_utils::helpers::codec_params_set_for_test(
+            &mut audio_params,
+            ffmpeg::ffi::AVCodecID::AV_CODEC_ID_AC3,
+            1536,
+            192000,
+        );
+
+        let video_idx = video_stream.index();
+        let audio_idx = aac_stream.index();
+
+        muxer
+            .add_video_stream(&video_params, video_idx)
+            .expect("Failed to add video stream");
+        muxer
+            .add_audio_stream(&audio_params, audio_idx)
+            .expect("Failed to add AC3 stream");
+
+        // Find the first packet of each stream
+        let mut video_packet = None;
+        let mut audio_packet = None;
+
+        for (s, mut pkt) in input.packets() {
+            if s.index() == video_idx && video_packet.is_none() {
+                if let Some(out_tb) = muxer.get_output_timebase(video_idx) {
+                    let in_tb = s.time_base();
+                    pkt.rescale_ts(in_tb, out_tb);
+                }
+                video_packet = Some(pkt);
+            } else if s.index() == audio_idx && audio_packet.is_none() {
+                if let Some(out_tb) = muxer.get_output_timebase(audio_idx) {
+                    let in_tb = s.time_base();
+                    pkt.rescale_ts(in_tb, out_tb);
+                }
+                audio_packet = Some(pkt);
+            }
+            if video_packet.is_some() && audio_packet.is_some() {
+                break;
+            }
+        }
+
+        let mut pkts = vec![];
+        if let Some(vp) = video_packet {
+            pkts.push(vp);
+        }
+        if let Some(ap) = audio_packet {
+            pkts.push(ap);
+        }
+
+        let pkt_refs: Vec<&mut ffmpeg::Packet> = pkts.iter_mut().collect();
+
+        let init_data = muxer
+            .generate_init_segment_with_packets(pkt_refs)
+            .expect("Failed to generate AV AC3 init segment");
 
         assert!(!init_data.is_empty(), "Init segment should not be empty");
         let box_type = &init_data[4..8];

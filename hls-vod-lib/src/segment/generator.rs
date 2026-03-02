@@ -177,16 +177,20 @@ pub(crate) fn generate_interleaved_init_segment(
     }
 
     // Only transcode if explicitly requested.
-    let needs_transcode = index
+    let transcode_to_aac = index
         .get_audio_stream(audio_idx)
         .map(|t| t.transcode_to == Some(ffmpeg::codec::Id::AAC))
         .unwrap_or(false);
 
-    let input = index.get_context()?;
+    let mut input = index.get_context()?;
     let mut muxer = Fmp4Muxer::new()?;
 
     let mut has_video = false;
     let mut has_audio = false;
+
+    // Collect parameters first to avoid mutably borrowing input while iterating streams
+    let mut video_params = None;
+    let mut audio_params = None;
 
     for stream in input.streams() {
         let params = stream.parameters();
@@ -195,21 +199,29 @@ pub(crate) fn generate_interleaved_init_segment(
 
         if crate::ffmpeg_utils::utils::is_video_codec(codec_id) {
             if idx == video_idx {
-                muxer.add_video_stream(&params, idx)?;
-                has_video = true;
+                video_params = Some(params.clone());
             }
         } else if crate::ffmpeg_utils::utils::is_audio_codec(codec_id) && idx == audio_idx {
-            if needs_transcode {
-                // Use AAC encoder parameters instead of source
-                let audio_info = index.get_audio_stream(audio_idx);
-                let bitrate = get_recommended_bitrate(audio_info.map(|a| a.channels).unwrap_or(2));
-                let encoder = AacEncoder::open(HLS_SAMPLE_RATE, 2, bitrate)?;
-                muxer.add_audio_stream(&encoder.codec_parameters(), idx)?;
-            } else {
-                muxer.add_audio_stream(&params, idx)?;
-            }
-            has_audio = true;
+            audio_params = Some(params.clone());
         }
+    }
+
+    if let Some(vp) = &video_params {
+        muxer.add_video_stream(vp, video_idx)?;
+        has_video = true;
+    }
+
+    if let Some(ap) = &audio_params {
+        if transcode_to_aac {
+            // Use AAC encoder parameters instead of source
+            let audio_info = index.get_audio_stream(audio_idx);
+            let bitrate = get_recommended_bitrate(audio_info.map(|a| a.channels).unwrap_or(2));
+            let encoder = AacEncoder::open(HLS_SAMPLE_RATE, 2, bitrate)?;
+            muxer.add_audio_stream(&encoder.codec_parameters(), audio_idx)?;
+        } else {
+            muxer.add_audio_stream(ap, audio_idx)?;
+        }
+        has_audio = true;
     }
 
     // Check if we found the requested streams
@@ -219,7 +231,58 @@ pub(crate) fn generate_interleaved_init_segment(
         ));
     }
 
-    let mut data = muxer.write_header(false)?;
+    let mut data = if transcode_to_aac {
+        muxer.write_header(false)?
+    } else {
+        // Fetch the first packet for video and audio to feed them to the muxer
+        let mut first_video = None;
+        let mut first_audio = None;
+
+        for (s, mut pkt) in input.packets() {
+            if s.index() == video_idx && first_video.is_none() {
+                if let Some(output_tb) = muxer.get_output_timebase(video_idx) {
+                    let input_tb = s.time_base();
+                    pkt.rescale_ts(input_tb, output_tb);
+                }
+                pkt.set_pts(Some(0));
+                pkt.set_dts(Some(0));
+                first_video = Some(pkt);
+            } else if s.index() == audio_idx && first_audio.is_none() {
+                if let Some(output_tb) = muxer.get_output_timebase(audio_idx) {
+                    let input_tb = s.time_base();
+                    pkt.rescale_ts(input_tb, output_tb);
+                }
+                pkt.set_pts(Some(0));
+                pkt.set_dts(Some(0));
+                first_audio = Some(pkt);
+            }
+            if first_video.is_some() && first_audio.is_some() {
+                break;
+            }
+        }
+
+        let mut packets = Vec::new();
+        if let Some(vp) = first_video {
+            packets.push(vp);
+        }
+        if let Some(ap) = first_audio {
+            packets.push(ap);
+        }
+
+        if !packets.is_empty() {
+            let refs: Vec<&mut ffmpeg::Packet> = packets.iter_mut().collect();
+            muxer
+                .generate_init_segment_with_packets(refs)
+                .map_err(|e| {
+                    HlsError::Muxing(format!(
+                        "Failed to generate interleaved init segment with packets: {}",
+                        e
+                    ))
+                })?
+        } else {
+            muxer.write_header(false)?
+        }
+    };
 
     // Calculate default duration for video trex
     let mut default_duration = 3000; // Default fallback (30fps)
