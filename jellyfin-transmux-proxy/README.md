@@ -49,6 +49,17 @@ jellyfin = "http://localhost:8096"
 # mediaroot = "/"
 ```
 
-## 🚧 Status
+## �️ Jellyfin Settings
+
+For the best experience, ensure that the following **User Settings** (under Playback) are configured in Jellyfin for each user:
+
+- [x] **Allow media playback**
+- [x] **Allow audio playback that requires transcoding**
+- [ ] **Allow video playback that requires transcoding**
+- [x] **Allow video playback that requires conversion without re-encoding**
+
+Since the proxy currently handles all transmuxing internally and supports audio-only transcoding, these settings allow the proxy to take over almost all MKV/MP4/WebM playback sessions while ensuring Jellyfin doesn't attempt to spawn its own video transcoding processes.
+
+## �🚧 Status
 
 This project is in active development. It currently excels at **transmuxing** and **audio transcoding**. High-performance video transcoding is on the roadmap. 🗺️
