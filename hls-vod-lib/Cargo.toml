@@ -5,6 +5,10 @@ edition = "2021"
 description = "Core HLS VOD library for media parsing, segment generation, and transcoding"
 license = "MIT"
 
+[features]
+default = []
+compat-ffmpeg7 = []
+
 [dependencies]
 ffmpeg-next = "8.0"
 thiserror = "1.0"
