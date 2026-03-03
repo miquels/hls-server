@@ -62,11 +62,8 @@ pub async fn proxy_handler(
         .http_client
         .request(req.method().clone(), uri_str.clone());
 
-    // Copy headers
     for (name, value) in req.headers() {
-        if name != reqwest::header::HOST {
-            proxy_req = proxy_req.header(name, value);
-        }
+        proxy_req = proxy_req.header(name, value);
     }
 
     // Stream the body
@@ -158,8 +155,7 @@ pub async fn websocket_handler(
         };
 
     for (name, value) in req.headers() {
-        if name != reqwest::header::HOST
-            && name != reqwest::header::SEC_WEBSOCKET_KEY
+        if name != reqwest::header::SEC_WEBSOCKET_KEY
             && name != reqwest::header::SEC_WEBSOCKET_ACCEPT
             && name != reqwest::header::SEC_WEBSOCKET_VERSION
             && name != reqwest::header::CONNECTION

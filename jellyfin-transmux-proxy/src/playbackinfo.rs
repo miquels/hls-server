@@ -59,10 +59,7 @@ pub async fn playback_info_handler(
     let mut proxy_req = state.http_client.request(method, upstream_uri.clone());
 
     for (name, value) in headers.iter() {
-        if name != reqwest::header::HOST
-            && name != reqwest::header::CONTENT_LENGTH
-            && name != reqwest::header::ACCEPT_ENCODING
-        {
+        if name != reqwest::header::CONTENT_LENGTH && name != reqwest::header::ACCEPT_ENCODING {
             proxy_req = proxy_req.header(name, value);
         }
     }
