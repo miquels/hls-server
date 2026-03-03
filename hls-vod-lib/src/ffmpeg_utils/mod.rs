@@ -44,6 +44,21 @@ pub fn install_log_filter() {
     // any threads begin generating segments.
     unsafe {
         ffmpeg_next::ffi::av_log_set_level(ffmpeg_next::ffi::AV_LOG_WARNING);
+
+        #[cfg(all(feature = "compat-ffmpeg7", target_os = "linux"))]
+        {
+            // On Linux/FFmpeg 7, the va_list type decays to a pointer in C but is an array in Rust.
+            // We use transmute to bridge the gap between our *mut c_void and the expected *mut __va_list_tag.
+            let callback: unsafe extern "C" fn(
+                *mut std::ffi::c_void,
+                std::ffi::c_int,
+                *const std::ffi::c_char,
+                *mut std::ffi::c_void,
+            ) = ffmpeg_log_callback;
+            ffmpeg_next::ffi::av_log_set_callback(Some(std::mem::transmute(callback)));
+        }
+
+        #[cfg(any(not(feature = "compat-ffmpeg7"), not(target_os = "linux")))]
         ffmpeg_next::ffi::av_log_set_callback(Some(ffmpeg_log_callback));
     }
 }
