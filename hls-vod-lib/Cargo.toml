@@ -6,7 +6,7 @@ description = "Core HLS VOD library for media parsing, segment generation, and t
 license = "MIT"
 
 [features]
-default = []
+default = ["compat-ffmpeg7"]
 compat-ffmpeg7 = []
 
 [dependencies]
