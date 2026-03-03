@@ -40,6 +40,22 @@ A lightweight reference implementation.
 ## Getting Started
 
 1. Clone the repository.
-2. Build the workspace: `cargo build --release`
-3. Configure your proxy using `jellyfix-transmux-proxy.toml`.
-4. Update your Jellyfin user settings to optimize for transmuxing.
+2. Install development libraries:
+   ```
+   apt update
+   apt install pkg-config \
+                clang \
+                libclang-dev \
+                llvm-dev \
+                libssl-dev \
+                libavcodec-dev \
+                libavformat-dev \
+                libavutil-dev \
+                libswresample-dev \
+                libswscale-dev \
+                libavdevice-dev \
+                libavfilter_dev
+   ```
+3. Build the workspace: `cargo build --release`
+4. Configure your proxy using `jellyfix-transmux-proxy.toml`.
+5. Update your Jellyfin user settings to optimize for transmuxing.
