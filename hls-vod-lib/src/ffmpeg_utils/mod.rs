@@ -62,7 +62,8 @@ unsafe extern "C" fn ffmpeg_log_callback(
     avcl: *mut std::ffi::c_void,
     level: std::ffi::c_int,
     fmt: *const std::ffi::c_char,
-    vl: ffmpeg_next::ffi::va_list,
+    #[cfg(feature = "compat-ffmpeg7")] vl: *mut ffmpeg_next::ffi::__va_list_tag,
+    #[cfg(not(feature = "compat-ffmpeg7"))] vl: ffmpeg_next::ffi::va_list,
 ) {
     use std::ffi::CStr;
 
@@ -78,7 +79,7 @@ unsafe extern "C" fn ffmpeg_log_callback(
         avcl,
         level,
         fmt,
-        vl,
+        vl as _,
         buf.as_mut_ptr(),
         buf.len() as std::ffi::c_int,
         &mut print_prefix,
