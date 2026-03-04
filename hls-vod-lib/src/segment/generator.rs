@@ -873,7 +873,63 @@ fn generate_media_segment_ffmpeg(
     // For interleaved segments, we need to mux both audio and video
     let is_interleaved = segment_type == "av";
 
+    // Use the video timebase stored at index time — no need to re-read it from the file.
+    let video_timebase = index.video_timebase;
+
+    // ── 1. Pre-Transcode Audio if necessary ──
+    // Doing this BEFORE acquiring the shared ffmpeg video context `Mutex` ensures
+    // that the heavy, slow audio transcoding step (which opens its own local file context)
+    // doesn't block other threads from concurrently reading video packets via `get_context()`.
+    let mut transcoded_audio_packets = Vec::new();
+    let mut audio_output_tb = None;
+    let mut audio_packet_idx = 0;
+
+    if is_interleaved && transcode_audio_to_aac {
+        if let Some(audio_idx) = audio_track_index {
+            let audio_info = index.get_audio_stream(audio_idx)?;
+            let (aac_packets, output_tb) = crate::transcode::pipeline::transcode_audio_segment(
+                &index.source_path,
+                audio_info,
+                segment,
+                video_timebase,
+                false, // DO NOT shift to zero, we need absolute timeline for Fmp4Muxer
+            )?;
+            transcoded_audio_packets = aac_packets;
+            audio_output_tb = Some(output_tb);
+            tracing::debug!(
+                "Pre-transcoded {} AAC packets for interleaved segment {}",
+                transcoded_audio_packets.len(),
+                segment.sequence
+            );
+        }
+    }
+
+    // ── 2. Acquire Video Context & Seek ──
     let mut input = index.get_context()?;
+
+    // Seek to segment start using timestamp-based seek (AV_TIME_BASE / microseconds).
+    // AVSEEK_FLAG_BYTE is not used here: avformat_find_stream_info already consumed
+    // ~13MB of the file, so backward byte-seeks are silently ignored by the MP4
+    // demuxer, resulting in 0 packets read.  Timestamp seek works correctly.
+    let seek_ts = if video_timebase.denominator() != 0 {
+        segment.start_pts * 1_000_000 * video_timebase.numerator() as i64
+            / video_timebase.denominator() as i64
+    } else {
+        segment.start_pts * 1_000_000 / 90_000
+    };
+    tracing::debug!(
+        "[sync] {} seg={} start_pts={} video_tb={}/{} seek_ts_us={}",
+        segment_type,
+        segment.sequence,
+        segment.start_pts,
+        video_timebase.numerator(),
+        video_timebase.denominator(),
+        seek_ts
+    );
+
+    input
+        .seek(seek_ts, ..seek_ts)
+        .map_err(|e| HlsError::Ffmpeg(crate::error::FfmpegError::ReadFrame(e.to_string())))?;
 
     let mut muxer = Fmp4Muxer::new()?;
     // We create a new muxer for each segment, which writes an init segment (header).
@@ -993,58 +1049,7 @@ fn generate_media_segment_ffmpeg(
         encoder_delay
     );
 
-    // Use the video timebase stored at index time — no need to re-read it from the file.
-    let video_timebase = index.video_timebase;
-
-    // Seek to segment start using timestamp-based seek (AV_TIME_BASE / microseconds).
-    // AVSEEK_FLAG_BYTE is not used here: avformat_find_stream_info already consumed
-    // ~13MB of the file, so backward byte-seeks are silently ignored by the MP4
-    // demuxer, resulting in 0 packets read.  Timestamp seek works correctly.
-    let seek_ts = if video_timebase.denominator() != 0 {
-        segment.start_pts * 1_000_000 * video_timebase.numerator() as i64
-            / video_timebase.denominator() as i64
-    } else {
-        segment.start_pts * 1_000_000 / 90_000
-    };
-    tracing::debug!(
-        "[sync] {} seg={} start_pts={} video_tb={}/{} seek_ts_us={}",
-        segment_type,
-        segment.sequence,
-        segment.start_pts,
-        video_timebase.numerator(),
-        video_timebase.denominator(),
-        seek_ts
-    );
-
-    input
-        .seek(seek_ts, ..seek_ts)
-        .map_err(|e| HlsError::Ffmpeg(crate::error::FfmpegError::ReadFrame(e.to_string())))?;
-
-    // ── Pre-Transcode Audio if necessary ──
-    let mut transcoded_audio_packets = Vec::new();
-    let mut audio_output_tb = None;
-    let mut audio_packet_idx = 0;
-
-    if is_interleaved && transcode_audio_to_aac {
-        if let Some(audio_idx) = audio_track_index {
-            let audio_info = index.get_audio_stream(audio_idx)?;
-            let (aac_packets, output_tb) = crate::transcode::pipeline::transcode_audio_segment(
-                &index.source_path,
-                audio_info,
-                segment,
-                video_timebase,
-                false, // DO NOT shift to zero, we need absolute timeline for Fmp4Muxer
-            )?;
-            transcoded_audio_packets = aac_packets;
-            audio_output_tb = Some(output_tb);
-            tracing::debug!(
-                "Pre-transcoded {} AAC packets for interleaved segment {}",
-                transcoded_audio_packets.len(),
-                segment.sequence
-            );
-        }
-    }
-
+    // (Audio transcoding was moved to the very top to avoid Mutex holding)
     let mut _packet_count = 0;
     // Track the rescaled DTS of the first packet we write...
     let mut first_packet_dts: Option<i64> = None;
