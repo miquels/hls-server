@@ -1,23 +1,23 @@
-# HLS Transmuxer Suite
+# HLS Transmuxer Software
 
 A collection of high-performance Rust tools and libraries designed for on-the-fly HLS transmuxing and audio transcoding.
 
 ## Why.
 
-This project was born out of a specific need for a more efficient way to handle Jellyfin streaming. The standard pipeline of spawning external FFmpeg processes and writing segments to disk often results in high I/O overhead and sluggish seeking. 
+On a jellyfin server with multiple clients, and harddisks instead of SSDs, the standard pipeline of spawning external FFmpeg processes and writing segments to disk often results in high I/O overhead and sluggish seeking, even when just transmuxing and not transcoding.
 
-This suite provides a native, in-memory alternative that significantly lowers server load and makes seeking feel instantaneous. While developed with Jellyfin in mind, the underlying library is modular enough for any Rust-based media project—perhaps even a future native Rust implementation of a media server.
+This software provides a native, in-memory alternative that significantly lowers server load and makes seeking significantly faster - close to instantaneous when transmuxing, and still fast when transcoding. While developed with Jellyfin in mind, the underlying library is modular enough for any Rust-based media project— perhaps even a future native Rust implementation of a media server.
 
 ---
 
 ## Primary Project: [Jellyfin Transmux Proxy](./jellyfin-transmux-proxy/README.md)
 
-This is a specialized edge proxy that sits in front of your Jellyfin server. It intelligently intercepts playback requests and handles the media stream internally.
+This is a specialized edge proxy that sits in front of your Jellyfin server. It intelligently intercepts transmuxing and transcoding playback requests and handles the media stream internally. Direct play streams are not intercepted.
 
 - **✅ No External FFmpeg**: Everything stays within the proxy process.
 - **✅ No Disk Thrashing**: Segments are generated and served from memory.
-- **✅ Instant Seek**: Experience the fastest seeking you've ever had in a web player.
-- **✅ Easy Integration**: Works with existing Jellyfin setups by just changing a few settings.
+- **✅ Fast Seek**: No overhead of restarting FFmpeg processes.
+- **✅ Easy Integration**: Works with existing Jellyfin setups.
 
 👉 **[Read the Full Proxy README](./jellyfin-transmux-proxy/README.md)** for setup instructions and features.
 
@@ -26,9 +26,9 @@ This is a specialized edge proxy that sits in front of your Jellyfin server. It 
 ## Components
 
 ### [hls-vod-lib](./hls-vod-lib/README.md)
-The engine under the hood. A standalone Rust crate for demuxing source files and packaging them into HLS-compliant fMP4 fragments. 🦀
+The hls library. A standalone Rust crate for demuxing source files and packaging them into HLS-compliant fMP4 fragments. 🦀
 - **Audio Transcoding**: Supports AC-3 to AAC conversion on-the-fly.
-- **A/V Interleaving**: Perfectly synced streams for modern browser compatibility.
+- **A/V Interleaving**: Perfectly synced streams for jellyfin-style HLS compatibility.
 
 ### [hls-vod-server](./hls-vod-server/README.md)
 A lightweight reference implementation.
@@ -58,4 +58,10 @@ A lightweight reference implementation.
    ```
 3. Build the workspace: `cargo build --release`
 4. Configure your proxy using `jellyfix-transmux-proxy.toml`.
-5. Update your Jellyfin user settings to optimize for transmuxing.
+5. Update your Jellyfin user settings to optimize for transmuxing: allow audio transcoding, disable video transcoding.
+
+---
+
+## AI used.
+
+This project was created with the help of Gemini and Claude, though a human had to steer the process, streamline the code, and test and debug playback.
