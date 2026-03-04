@@ -176,14 +176,24 @@ impl PlaylistOrSegment {
             if let Some(b) = c.get(&self.index.stream_id, &segment_key) {
                 // Continue the look-ahead chain even on cache hits,
                 // otherwise the chain breaks after `lookahead` segments.
-                self.spawn_lookahead();
+                if self.is_media_segment() {
+                    self.spawn_lookahead();
+                }
                 return Ok(b.to_vec());
             }
         }
 
+        let is_media_segment = self.is_media_segment();
+
+        // Eager Look-ahead: We spawn the background lookahead generation *before*
+        // we block on generating the current segment. This hides the generation
+        // latency of N+1 by working on it concurrently with N.
+        if is_media_segment {
+            self.spawn_lookahead();
+        }
+
         // For media segments, use double-checked locking to avoid
         // duplicate generation (e.g. from look-ahead + player request).
-        let is_media_segment = self.is_media_segment();
         if is_media_segment {
             if let Some(c) = crate::cache::segment_cache() {
                 let lock = c.acquire_generation_lock(&self.index.stream_id, &segment_key);
@@ -210,11 +220,6 @@ impl PlaylistOrSegment {
                 );
                 c.cleanup_generation_lock(&self.index.stream_id, &segment_key);
             }
-        }
-
-        // Spawn look-ahead background generation.
-        if is_media_segment {
-            self.spawn_lookahead();
         }
 
         Ok(data)
