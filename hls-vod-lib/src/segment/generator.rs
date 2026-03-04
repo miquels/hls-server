@@ -1200,12 +1200,14 @@ fn generate_media_segment_ffmpeg(
 
         // For interleaved segments, always use per-track tfdt patching
         // because video and audio tracks have different timescales.
+        // The audio tfdt must be in the audio track's OUTPUT timebase.
         let audio_tfdt_for_patch = if transcode_audio_to_aac {
-            // Transcoded audio uses 90kHz timebase
-            audio_target_tfdt
+            // Transcoded audio: AAC encoder outputs at HLS_SAMPLE_RATE (48kHz)
+            let audio_tb = ffmpeg::Rational::new(1, HLS_SAMPLE_RATE as i32);
+            crate::ffmpeg_utils::utils::rescale_ts(segment.start_pts, video_timebase, audio_tb)
+                .max(0) as u64
         } else {
-            // Non-transcoded audio: compute tfdt in the audio's native timebase
-            // (e.g., 1/48000 for AAC at 48kHz), NOT in 90kHz.
+            // Non-transcoded audio: use the source audio's native sample rate
             let a_idx = audio_track_index.unwrap_or(0);
             if let Ok(audio_info) = index.get_audio_stream(a_idx) {
                 let audio_tb = ffmpeg::Rational::new(1, audio_info.sample_rate as i32);
