@@ -158,7 +158,7 @@ pub async fn playback_info_handler(
 
 fn profile_is(profile: &TranscodingProfile, container: &str) -> bool {
     profile.profile_type == "Video"
-        && profile.protocol == "hls"
+        && profile.protocol.as_deref() == Some("hls")
         && profile.container.as_deref() == Some(container)
 }
 

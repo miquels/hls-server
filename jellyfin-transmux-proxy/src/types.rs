@@ -144,8 +144,10 @@ pub struct TranscodingProfile {
     pub audio_codec: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub video_codec: Option<String>,
-    pub context: String,  // e.g., "Streaming"
-    pub protocol: String, // e.g., "hls"
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<String>,  // e.g., "Streaming"
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol: Option<String>, // e.g., "hls"
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
