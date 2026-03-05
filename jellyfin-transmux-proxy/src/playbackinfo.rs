@@ -334,8 +334,8 @@ mod tests {
                         profile_type: "Audio".to_string(),
                         video_codec: None,
                         audio_codec: Some("mp3".to_string()),
-                        protocol: "http".to_string(),
-                        context: "Streaming".to_string(),
+                        protocol: Some("http".to_string()),
+                        context: Some("Streaming".to_string()),
                         ..Default::default()
                     },
                     crate::types::TranscodingProfile {
@@ -343,8 +343,8 @@ mod tests {
                         profile_type: "Video".to_string(),
                         video_codec: None,
                         audio_codec: None,
-                        protocol: "hls".to_string(),
-                        context: "Streaming".to_string(),
+                        protocol: Some("hls".to_string()),
+                        context: Some("Streaming".to_string()),
                         ..Default::default()
                     },
                 ],
