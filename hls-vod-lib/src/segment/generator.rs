@@ -916,6 +916,10 @@ fn mux_media_segment(
             }
         }
 
+        if pts_90k < start_pts_90k {
+            continue;
+        }
+
         if transcode_audio_to_aac {
             write_transcoded_audio_upto!(dts_90k);
         }

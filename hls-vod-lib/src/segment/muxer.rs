@@ -125,34 +125,6 @@ impl Fmp4Muxer {
         Ok(data)
     }
 
-    /// Generate an init segment by writing a single packet to force `moov` creation.
-    /// Essential for streams like AC-3 that lack extradata in the source container.
-    pub fn generate_init_segment_with_packet(
-        &mut self,
-        packet: &mut ffmpeg::Packet,
-    ) -> Result<Vec<u8>> {
-        let mut opts = ffmpeg::Dictionary::new();
-        opts.set("movflags", "empty_moov+default_base_moof+delay_moov");
-        opts.set("avoid_negative_ts", "0");
-
-        self.output
-            .write_header_with(opts)
-            .map_err(|e| FfmpegError::WriteError(format!("Failed to write header: {}", e)))?;
-
-        self.write_packet(packet)?;
-        let _ = self.output.write_trailer();
-
-        let full_data = self.writer.data();
-        self.writer.clear();
-
-        // Extract just ftyp + moov by finding the first media box
-        if let Some(offset) = find_media_segment_offset(&full_data) {
-            Ok(full_data[..offset].to_vec())
-        } else {
-            Ok(full_data)
-        }
-    }
-
     /// Generate an init segment by writing multiple packets to force `moov` creation.
     /// Essential for interleaved segments with streams like AC-3 that lack extradata
     /// in the source container.
@@ -651,7 +623,7 @@ mod tests {
         }
 
         let init_data = muxer
-            .generate_init_segment_with_packet(&mut pkt)
+            .generate_init_segment_with_packets(vec![&mut pkt])
             .expect("Failed to generate AC3 init segment");
 
         assert!(!init_data.is_empty(), "Init segment should not be empty");

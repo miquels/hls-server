@@ -28,18 +28,21 @@ fn test_dump_segments() {
     let video_idx = 0;
     let audio_idx = 2; // AC-3 is stream 2 in video-alex.mp4
 
-    let av_init = generate_interleaved_init_segment(&media, video_idx, audio_idx, None).unwrap();
+    let av_init =
+        generate_interleaved_init_segment(&media, video_idx, audio_idx, Some("aac")).unwrap();
     std::fs::write("/tmp/av_init.mp4", &av_init).unwrap();
     println!("Wrote interleaved init segment: {} bytes", av_init.len());
 
     let seg0 = media.segments.get(0).unwrap();
     let av_bytes0 =
-        generate_interleaved_segment(&media, video_idx, audio_idx, seg0, &asset, None).unwrap();
+        generate_interleaved_segment(&media, video_idx, audio_idx, seg0, &asset, Some("aac"))
+            .unwrap();
     std::fs::write("/tmp/av0.mp4", &av_bytes0).unwrap();
 
     let seg1 = media.segments.get(1).unwrap();
     let av_bytes1 =
-        generate_interleaved_segment(&media, video_idx, audio_idx, seg1, &asset, None).unwrap();
+        generate_interleaved_segment(&media, video_idx, audio_idx, seg1, &asset, Some("aac"))
+            .unwrap();
     std::fs::write("/tmp/av1.mp4", &av_bytes1).unwrap();
 
     // Combine for ffprobe

@@ -8,13 +8,11 @@ use crate::subtitle::extractor::SubtitleCue;
 use bytes::Bytes;
 
 /// WebVTT writer configuration
-#[derive(Debug, Clone)]
-#[derive(Default)]
+#[derive(Debug, Clone, Default)]
 pub struct WebVttConfig {
     /// Include WebVTT header comment
     pub include_header_comment: bool,
 }
-
 
 /// WebVTT writer for generating subtitle segments
 pub struct WebVttWriter {
