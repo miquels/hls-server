@@ -722,6 +722,7 @@ fn buffer_media_packets(
                     audio_done = true;
                 }
             }
+
             if audio_done {
                 if video_done {
                     break;
@@ -944,6 +945,7 @@ fn finalize_segment(
     audio_track_index: Option<usize>,
     mut muxer: Fmp4Muxer,
     first_audio_dts: Option<i64>,
+    first_packet_dts: Option<i64>,
 ) -> Result<Bytes> {
     let full_data = muxer.finalize()?;
 
@@ -1035,7 +1037,26 @@ fn finalize_segment(
             audio_tfdt_for_patch,
         );
     } else {
-        crate::segment::isobmff::patch_tfdts(&mut media_data, video_target_tfdt, start_frag_seq);
+        let single_track_tfdt = if segment_type == "video" {
+            video_target_tfdt
+        } else {
+            let a_idx = audio_track_index.unwrap_or(0);
+            if transcode_audio_to_aac {
+                let audio_tb =
+                    ffmpeg::Rational::new(1, crate::transcode::pipeline::HLS_SAMPLE_RATE as i32);
+                crate::ffmpeg_utils::utils::rescale_ts(segment.start_pts, video_timebase, audio_tb)
+                    .max(0) as u64
+            } else if let Ok(audio_info) = index.get_audio_stream(a_idx) {
+                let audio_tb = ffmpeg::Rational::new(1, audio_info.sample_rate as i32);
+                crate::ffmpeg_utils::utils::rescale_ts(segment.start_pts, video_timebase, audio_tb)
+                    .max(0) as u64
+            } else if let Some(dts) = first_packet_dts {
+                dts as u64
+            } else {
+                0
+            }
+        };
+        crate::segment::isobmff::patch_tfdts(&mut media_data, single_track_tfdt, start_frag_seq);
     }
 
     let styp_box: [u8; 24] = [
@@ -1184,6 +1205,7 @@ fn generate_media_segment_ffmpeg(
         audio_track_index,
         muxer,
         _a_dts,
+        _p_dts,
     )
 }
 #[cfg(test)]

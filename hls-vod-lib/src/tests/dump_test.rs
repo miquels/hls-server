@@ -14,6 +14,12 @@ fn test_dump_segments() {
         return;
     }
     let media = StreamIndex::open(&asset, None).unwrap();
+    for (i, seg) in media.segments.iter().enumerate() {
+        println!(
+            "xxx dump_test segment {}: start_pts={}, end_pts={}",
+            i, seg.start_pts, seg.end_pts
+        );
+    }
 
     // === VIDEO ONLY ===
     let video_init = generate_video_init_segment(&media).unwrap();
@@ -23,6 +29,19 @@ fn test_dump_segments() {
     let video_bytes = generate_video_segment(&media, 0, 0, &asset).unwrap();
     std::fs::write("/tmp/vid0.mp4", &video_bytes).unwrap();
     println!("Wrote video segment 0: {} bytes", video_bytes.len());
+
+    // === AUDIO ONLY (AAC) ===
+    let audio_init_aac = generate_audio_init_segment(&media, 1, None).unwrap();
+    std::fs::write("/tmp/aud_init_aac.mp4", &audio_init_aac).unwrap();
+    println!("Wrote audio init (aac): {} bytes", audio_init_aac.len());
+
+    let aud0_aac = generate_audio_segment(&media, 1, 0, &asset, None).unwrap();
+    std::fs::write("/tmp/aud0_aac.mp4", &aud0_aac).unwrap();
+    println!("Wrote aac mod 0: {} bytes", aud0_aac.len());
+
+    let aud1_aac = generate_audio_segment(&media, 1, 1, &asset, None).unwrap();
+    std::fs::write("/tmp/aud1_aac.mp4", &aud1_aac).unwrap();
+    println!("Wrote aac mod 1: {} bytes", aud1_aac.len());
 
     // === INTERLEAVED (AV, no transcoding) ===
     let video_idx = 0;
