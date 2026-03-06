@@ -24,7 +24,7 @@
 # Special settings for Safari.
 [safari]
   # Hack for safari.
-  force_transcoding = true
+  #force_transcoding = true
 
 # Settins for the Jellyfin server we proxy to.
 [jellyfin]
