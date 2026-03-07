@@ -311,6 +311,55 @@ mod tests {
         }
     }
 
+    /// Same as dump_alex_interleaved but with AC-3→AAC transcoding enabled.
+    #[test]
+    fn dump_alex_interleaved_transcoded() {
+        let _ = ffmpeg::init();
+        let asset_path = std::path::PathBuf::from("/Users/mikevs/Devel/hls-server/tests/assets/alex.mp4");
+        if !asset_path.exists() {
+            eprintln!("⚠  alex.mp4 not found — skipping");
+            return;
+        }
+
+        let media = crate::media::StreamIndex::open(&asset_path, None).expect("scan failed");
+        let video_idx = 0usize;
+        let audio_idx = 3usize;
+        let transcode = Some("aac");
+        let audio_sample_rate = 48000u64; // transcoded AAC is always 48kHz
+
+        let init = crate::segment::generator::generate_interleaved_init_segment(
+            &media, video_idx, audio_idx, transcode,
+        ).expect("init failed");
+        std::fs::write("/tmp/alex_av_transcoded_init.mp4", &init).unwrap();
+        eprintln!("transcoded init: {} bytes", init.len());
+
+        for seg_idx in 0..media.segments.len().min(3) {
+            let seg = crate::segment::generator::generate_interleaved_segment(
+                &media, video_idx, audio_idx, &media.segments[seg_idx], &asset_path, transcode,
+            ).expect("seg failed");
+            std::fs::write(format!("/tmp/alex_av_transcoded{}.m4s", seg_idx), &seg).unwrap();
+            eprintln!("transcoded seg{}: {} bytes", seg_idx, seg.len());
+
+            let all_moofs = parse_all_moofs(&seg);
+            eprintln!("  {} fragment(s)", all_moofs.len());
+            for (fi, (v_tfdt, a_tfdt, v_cnt, a_cnt, v_dur, a_def_dur)) in all_moofs.iter().enumerate() {
+                let v_end = v_tfdt + v_dur;
+                let a_end = a_tfdt + a_cnt * a_def_dur;
+                eprintln!("  frag{}: video tfdt={} end={} ({:.3}s-{:.3}s)  audio tfdt={} end={} ({:.3}s-{:.3}s) cnt={}",
+                    fi,
+                    v_tfdt, v_end, *v_tfdt as f64/90000.0, v_end as f64/90000.0,
+                    a_tfdt, a_end, *a_tfdt as f64/audio_sample_rate as f64, a_end as f64/audio_sample_rate as f64,
+                    a_cnt,
+                );
+            }
+            if let Some(last) = all_moofs.last() {
+                let (_, a_tfdt, _, a_cnt, _, a_def_dur) = last;
+                let total_a_end = a_tfdt + a_cnt * a_def_dur;
+                eprintln!("  transcoded seg{} audio total end sample={} ({:.3}s)", seg_idx, total_a_end, total_a_end as f64/audio_sample_rate as f64);
+            }
+        }
+    }
+
     /// Parse all moof boxes in a segment: (video_tfdt, audio_tfdt, video_count, audio_count, video_total_dur, audio_default_dur)
     fn parse_all_moofs(data: &[u8]) -> Vec<(u64, u64, u64, u64, u64, u64)> {
         let mut results = Vec::new();

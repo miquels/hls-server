@@ -166,9 +166,14 @@ pub fn transcode_audio_segment(
         / video_timebase.denominator() as f64;
     let segment_start_48k = (segment_start_sec * HLS_SAMPLE_RATE as f64) as i64;
 
-    // Snap the segment start precisely to the mathematical 1024-sample boundary
-    // to guarantee no gap/overlap drift across segments.
-    let target_grid_start_48k = (segment_start_48k / AAC_FRAME_SIZE as i64) * AAC_FRAME_SIZE as i64;
+    // Snap to the first AAC frame boundary that is >= the segment start.
+    // Using ceil (not floor) ensures the first output packet belongs to THIS
+    // segment, not the previous one.  Floor would include a frame that already
+    // appeared at the end of the previous segment, creating a 1024-sample
+    // (~21 ms at 48 kHz) overlap that confuses MSE timeline reconciliation.
+    let target_grid_start_48k = ((segment_start_48k + AAC_FRAME_SIZE as i64 - 1)
+        / AAC_FRAME_SIZE as i64)
+        * AAC_FRAME_SIZE as i64;
 
     let mut aac_packets: Vec<ffmpeg::codec::packet::Packet> = Vec::new();
 
