@@ -1232,27 +1232,25 @@ fn generate_media_segment_ffmpeg(
         )));
     }
 
-    // delay_moov is required when there are no video keyframes to trigger
-    // frag_keyframe (pure audio segments), or when we transcode audio and need
-    // FFmpeg to normalise timestamps before writing moov (interleaved + transcode).
-    // For non-transcoded interleaved segments, use frag_keyframe instead: the
-    // video keyframe acts as a natural fragment boundary and timestamps flow
-    // through unchanged, avoiding the CTTS/tfdt corruption that delay_moov
-    // causes for B-frame sources.
-    // AAC is the only audio codec the mov muxer can write into moov without
-    // seeing packets first. Every other codec (AC-3, E-AC-3, MP3, Opus, FLAC,
-    // TrueHD, …) either requires bitstream-derived extradata or has a variable
-    // frame size that FFmpeg can only determine from actual packets. When
-    // transcoding to AAC we emit AAC parameters upfront, so no delay needed.
-    // Use delay_moov for any non-AAC audio pass-through.
+    // delay_moov is required when:
+    //   1. Pure audio segments: no video keyframes to drive fragmentation.
+    //   2. Non-transcoded interleaved segments with a non-AAC audio codec
+    //      (AC-3, E-AC-3, MP3, Opus, FLAC, TrueHD, …): the mov muxer can't
+    //      write the moov without seeing actual packets because those codecs
+    //      either need bitstream-derived extradata or have variable frame sizes.
+    //
+    // For interleaved segments where audio is transcoded to AAC, the muxer
+    // already has complete AAC codec parameters at write_header time (from
+    // encoder.codec_parameters()), so no delay is needed — same code path as
+    // native-AAC interleaved.  Using delay_moov here would cause the same
+    // CTTS/tfdt corruption it causes for non-transcoded B-frame video.
     let audio_needs_delay_moov = !transcode_audio_to_aac
         && audio_track_index
             .and_then(|idx| index.get_audio_stream(idx).ok())
             .map(|a| a.codec_id != ffmpeg::codec::Id::AAC)
             .unwrap_or(false);
-    let needs_delay_moov = segment_type == "audio"
-        || (segment_type == "av" && transcode_audio_to_aac)
-        || (segment_type == "av" && audio_needs_delay_moov);
+    let needs_delay_moov =
+        segment_type == "audio" || (segment_type == "av" && audio_needs_delay_moov);
     muxer.write_header(needs_delay_moov)?;
 
     let buffered_packets = buffer_media_packets(
