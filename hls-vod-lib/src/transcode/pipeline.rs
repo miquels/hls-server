@@ -175,6 +175,20 @@ pub fn transcode_audio_segment(
         / AAC_FRAME_SIZE as i64)
         * AAC_FRAME_SIZE as i64;
 
+    // Snap to the first AAC frame boundary that is >= the segment END (= next segment's start).
+    // Any AAC frame at or beyond this boundary belongs to the next segment, not this one.
+    // Without this cap, the last decoded AC-3/Opus/… frame may expand into extra AAC frames
+    // that overlap with the next segment's pre-roll window, causing A/V desynchronisation.
+    let segment_end_sec = segment.end_pts as f64 * video_timebase.numerator() as f64
+        / video_timebase.denominator() as f64;
+    let segment_end_48k = (segment_end_sec * HLS_SAMPLE_RATE as f64) as i64;
+    let audio_end_limit_48k = if segment_end_48k > segment_start_48k {
+        ((segment_end_48k + AAC_FRAME_SIZE as i64 - 1) / AAC_FRAME_SIZE as i64)
+            * AAC_FRAME_SIZE as i64
+    } else {
+        i64::MAX
+    };
+
     let mut aac_packets: Vec<ffmpeg::codec::packet::Packet> = Vec::new();
 
     for mut frame in pcm_frames {
@@ -184,8 +198,10 @@ pub fn transcode_audio_segment(
 
         while let Some(mut pkt) = encoder.receive_packet()? {
             let pkt_pts = pkt.pts().unwrap_or(0);
-            // Drop packets that are entirely before our target segment boundary (pre-roll/primer)
-            if pkt_pts >= target_grid_start_48k {
+            // Keep only packets within [target_grid_start_48k, audio_end_limit_48k).
+            // The lower bound drops pre-roll; the upper bound prevents this segment's audio
+            // from overlapping with the next segment's audio range.
+            if pkt_pts >= target_grid_start_48k && pkt_pts < audio_end_limit_48k {
                 if shift_to_zero {
                     let relative_pts = pkt_pts - target_grid_start_48k;
                     pkt.set_pts(Some(relative_pts));
@@ -201,7 +217,7 @@ pub fn transcode_audio_segment(
     let tail = encoder.flush()?;
     for mut pkt in tail {
         let pkt_pts = pkt.pts().unwrap_or(0);
-        if pkt_pts >= target_grid_start_48k {
+        if pkt_pts >= target_grid_start_48k && pkt_pts < audio_end_limit_48k {
             if shift_to_zero {
                 let relative_pts = pkt_pts - target_grid_start_48k;
                 pkt.set_pts(Some(relative_pts));
