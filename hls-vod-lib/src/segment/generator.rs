@@ -785,6 +785,7 @@ fn transcode_audio_if_needed(
     buffered_packets: &[BufferedPacket],
     segment: &SegmentInfo,
     video_timebase: ffmpeg::Rational,
+    audio_preroll: Vec<ffmpeg::Packet>,
 ) -> Result<(Vec<ffmpeg::Packet>, Option<ffmpeg::Rational>)> {
     let mut transcoded_audio_packets = Vec::new();
     let mut audio_output_tb = None;
@@ -794,20 +795,35 @@ fn transcode_audio_if_needed(
             if let Some(s) = input.stream(audio_idx) {
                 let decoder = crate::transcode::decoder::AudioDecoder::open(&s)?;
                 let audio_info = index.get_audio_stream(audio_idx)?;
-                let raw_audio_packets: Vec<_> = buffered_packets
+                let audio_tb = s.time_base();
+
+                // Collect audio packets from the main buffered set
+                let main_audio_packets: Vec<_> = buffered_packets
                     .iter()
                     .filter(|p| p.stream_id == audio_idx)
                     .map(|p| p.packet.clone())
                     .collect();
 
-                let mut audio_tb = ffmpeg::Rational(1, 90000);
-                if let Some(p) = buffered_packets.iter().find(|p| p.stream_id == audio_idx) {
-                    audio_tb = p.timebase;
+                // Merge pre-roll with main packets, deduplicating by DTS.
+                // The pre-roll seek may return packets that also appear after the
+                // main byte-aligned seek (interleaving overlap), so we skip any
+                // main packet whose DTS already appears in the pre-roll.
+                let preroll_dts: std::collections::HashSet<i64> = audio_preroll
+                    .iter()
+                    .map(|p| p.dts().or(p.pts()).unwrap_or(i64::MIN))
+                    .collect();
+                let mut all_audio_packets = audio_preroll;
+                for pkt in main_audio_packets {
+                    let dts = pkt.dts().or(pkt.pts()).unwrap_or(i64::MIN);
+                    if !preroll_dts.contains(&dts) {
+                        all_audio_packets.push(pkt);
+                    }
                 }
+                all_audio_packets.sort_by_key(|p| p.dts().or(p.pts()).unwrap_or(0));
 
                 let (aac_packets, output_tb) = crate::transcode::pipeline::transcode_audio_segment(
                     decoder,
-                    raw_audio_packets,
+                    all_audio_packets,
                     audio_tb,
                     audio_info,
                     segment,
@@ -859,6 +875,7 @@ fn mux_media_segment(
     let mut first_packet_dts: Option<i64> = None;
     let mut first_video_dts: Option<i64> = None;
     let mut first_audio_dts: Option<i64> = None;
+    let mut video_dts_corrected = false;
 
     let mut audio_packet_idx = 0;
 
@@ -890,6 +907,10 @@ fn mux_media_segment(
                         }
 
                         pkt.set_stream(audio_idx);
+                        // Ensure AAC frame duration is explicitly 1024 so the
+                        // mp4 muxer uses it for the last sample's trun entry
+                        // (otherwise it computes a truncated duration).
+                        pkt.set_duration(1024);
                         muxer.write_packet(pkt)?;
                         audio_packet_idx += 1;
                     } else {
@@ -929,6 +950,15 @@ fn mux_media_segment(
         };
         if pts_90k < stream_threshold {
             continue;
+        }
+
+        // Fix FFmpeg post-seek DTS=PTS bug: after certain seeks, FFmpeg's MOV
+        // demuxer sets DTS=PTS for the first video packet. Correct DTS to
+        // segment.start_pts (the IDR's actual DTS from the container index)
+        // so that both TFDT and CTTS are computed correctly by the muxer.
+        if is_video_stream && !video_dts_corrected {
+            packet.set_dts(Some(segment.start_pts));
+            video_dts_corrected = true;
         }
 
         if let Some(out_tb) = muxer.get_output_timebase(stream_id) {
@@ -1160,6 +1190,45 @@ fn generate_media_segment_ffmpeg(
     // and lands on the PREVIOUS keyframe instead. Adding 500ms to ts ensures
     // PTS(target IDR) <= ts while still being well below the next segment's IDR.
     let seek_ts_with_slack = seek_ts + 500_000; // +500ms to clear B-frame CTO
+
+    // For transcoded audio in interleaved segments, collect a pre-roll window
+    // of audio packets before the main seek position.  In MP4 files the
+    // demuxer's timestamp-based seek lands at the video IDR's byte offset;
+    // audio packets interleaved just before that offset are skipped, creating
+    // an 85 ms+ gap at certain segment boundaries.  By collecting those packets
+    // in a separate backward seek (before the main seek repositions the
+    // demuxer) and prepending them to the transcoder's input, the
+    // target_grid_start_48k filter still discards out-of-range output — so
+    // this pre-roll has no effect on segment boundaries, only on coverage.
+    let audio_preroll_packets: Vec<ffmpeg::Packet> = if transcode_audio_to_aac {
+        if let Some(audio_idx) = audio_track_index {
+            let preroll_seek_us = (seek_ts - 1_000_000).max(0);
+            let mut preroll = Vec::new();
+            let _ = input.seek(preroll_seek_us, ..seek_ts_with_slack);
+            for (stream, packet) in input.packets() {
+                if stream.index() != audio_idx {
+                    continue;
+                }
+                let pkt_pts = packet.pts().or(packet.dts()).unwrap_or(0);
+                let pkt_us = crate::ffmpeg_utils::utils::rescale_ts(
+                    pkt_pts,
+                    stream.time_base(),
+                    ffmpeg::Rational(1, 1_000_000),
+                );
+                // Stop once we enter the window that buffer_media_packets will cover
+                if pkt_us >= seek_ts_with_slack {
+                    break;
+                }
+                preroll.push(packet);
+            }
+            preroll
+        } else {
+            vec![]
+        }
+    } else {
+        vec![]
+    };
+
     input
         .seek(seek_ts_with_slack, ..(seek_ts + 2_000_000))
         .map_err(|e| HlsError::Ffmpeg(crate::error::FfmpegError::ReadFrame(e.to_string())))?;
@@ -1265,6 +1334,7 @@ fn generate_media_segment_ffmpeg(
         &buffered_packets,
         segment,
         video_timebase,
+        audio_preroll_packets,
     )?;
 
     std::mem::drop(input);

@@ -18,18 +18,6 @@ impl Fmp4Muxer {
     pub fn new() -> Result<Self> {
         let (output, writer) = create_memory_io()?;
 
-        // Critical options for fMP4/HLS
-        // frag_keyframe: Fragment at every keyframe (we control this by inputs usually,
-        //                or we let ffmpeg fragment at every video keyframe)
-        // empty_moov: Write an empty moov box (typical for fMP4)
-        // default_base_moof: Use default-base-is-moof flag (optimization)
-        // frag_duration: Set to a large value (60s) to prevent splitting segments into multiple fragments
-        let mut opts = ffmpeg::Dictionary::new();
-        opts.set("movflags", "empty_moov+default_base_moof");
-        opts.set("frag_duration", "60000000"); // 60s in microseconds
-
-        // In ffmpeg-next, options are passed to write_header mostly.
-
         Ok(Self {
             output,
             writer,
@@ -109,6 +97,10 @@ impl Fmp4Muxer {
             opts.set("movflags", "empty_moov+default_base_moof");
         }
         opts.set("avoid_negative_ts", "0");
+        // Prevent the mp4 muxer from implicitly adding frag_keyframe (which
+        // splits each segment into multiple moof/mdat fragments at every video
+        // keyframe).  A large frag_duration ensures one fragment per segment.
+        opts.set("frag_duration", "60000000");
 
         self.output
             .write_header_with(opts)

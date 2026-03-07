@@ -175,19 +175,17 @@ pub fn transcode_audio_segment(
         / AAC_FRAME_SIZE as i64)
         * AAC_FRAME_SIZE as i64;
 
-    // Snap to the first AAC frame boundary that is >= the segment END (= next segment's start).
-    // Any AAC frame at or beyond this boundary belongs to the next segment, not this one.
-    // Without this cap, the last decoded AC-3/Opus/… frame may expand into extra AAC frames
-    // that overlap with the next segment's pre-roll window, causing A/V desynchronisation.
+    // Cap at the first AAC frame boundary at or after segment end.
+    // The last buffered AC-3 packet straddles the segment boundary and its
+    // decoded PCM produces 1–2 extra AAC frames that would otherwise bleed into
+    // the next segment, causing MSE timeline desync.  By capping at this
+    // boundary we guarantee segment N ends where segment N+1 begins.
     let segment_end_sec = segment.end_pts as f64 * video_timebase.numerator() as f64
         / video_timebase.denominator() as f64;
     let segment_end_48k = (segment_end_sec * HLS_SAMPLE_RATE as f64) as i64;
-    let audio_end_limit_48k = if segment_end_48k > segment_start_48k {
-        ((segment_end_48k + AAC_FRAME_SIZE as i64 - 1) / AAC_FRAME_SIZE as i64)
-            * AAC_FRAME_SIZE as i64
-    } else {
-        i64::MAX
-    };
+    let audio_end_limit_48k = ((segment_end_48k + AAC_FRAME_SIZE as i64 - 1)
+        / AAC_FRAME_SIZE as i64)
+        * AAC_FRAME_SIZE as i64;
 
     let mut aac_packets: Vec<ffmpeg::codec::packet::Packet> = Vec::new();
 
@@ -198,9 +196,6 @@ pub fn transcode_audio_segment(
 
         while let Some(mut pkt) = encoder.receive_packet()? {
             let pkt_pts = pkt.pts().unwrap_or(0);
-            // Keep only packets within [target_grid_start_48k, audio_end_limit_48k).
-            // The lower bound drops pre-roll; the upper bound prevents this segment's audio
-            // from overlapping with the next segment's audio range.
             if pkt_pts >= target_grid_start_48k && pkt_pts < audio_end_limit_48k {
                 if shift_to_zero {
                     let relative_pts = pkt_pts - target_grid_start_48k;
@@ -285,17 +280,27 @@ fn rechunk_pcm_frames(
     let mut offset = skip_samples;
 
     while offset < total {
-        let n = chunk_size.min(total - offset);
-        let mut out = ffmpeg::util::frame::Audio::new(format, n, layout);
+        let avail = total - offset;
+        // Always produce full chunk_size frames. Pad the last frame with
+        // zeros if fewer than chunk_size samples remain — this prevents the
+        // AAC encoder from producing tiny malformed packets while keeping
+        // the frame count (and thus the decode timeline) correct.
+        let mut out = ffmpeg::util::frame::Audio::new(format, chunk_size, layout);
         out.set_rate(rate);
+        let copy_n = avail.min(chunk_size);
         for ch in 0..channels {
             let plane = crate::ffmpeg_utils::helpers::audio_plane_data_mut(&mut out, ch);
-            let floats_out = crate::ffmpeg_utils::helpers::fltp_plane_as_f32_mut(plane, n)
+            let floats_out = crate::ffmpeg_utils::helpers::fltp_plane_as_f32_mut(plane, chunk_size)
                 .expect("FLTP plane: bad alignment or length");
-            floats_out.copy_from_slice(&bufs[ch][offset..offset + n]);
+            floats_out[..copy_n].copy_from_slice(&bufs[ch][offset..offset + copy_n]);
+            // Zero-pad the remainder (if any) — the frame was zero-initialized
+            // by Audio::new but be explicit for clarity.
+            for s in &mut floats_out[copy_n..] {
+                *s = 0.0;
+            }
         }
         result.push(out);
-        offset += n;
+        offset += copy_n;
     }
 
     result

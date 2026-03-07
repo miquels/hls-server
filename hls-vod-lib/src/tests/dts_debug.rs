@@ -311,7 +311,7 @@ mod tests {
         }
     }
 
-    /// Dump fackham.mp4 interleaved transcoded segments around timestamps with reported glitches.
+    /// Generate ALL fackham.mp4 interleaved transcoded segments and check A/V continuity.
     #[test]
     fn dump_fackham_interleaved_transcoded() {
         let _ = ffmpeg::init();
@@ -323,69 +323,79 @@ mod tests {
 
         let media = crate::media::StreamIndex::open(&asset_path, None).expect("scan failed");
 
-        // Print stream layout
-        eprintln!("video streams: {}", media.video_streams.len());
-        for v in &media.video_streams {
-            eprintln!("  video idx={} codec={:?} fps={}/{}", v.stream_index, v.codec_id,
-                v.framerate.numerator(), v.framerate.denominator());
-        }
-        eprintln!("audio streams: {}", media.audio_streams.len());
-        for a in &media.audio_streams {
-            eprintln!("  audio idx={} codec={:?} rate={} ch={} lang={:?}",
-                a.stream_index, a.codec_id, a.sample_rate, a.channels, a.language);
-        }
-        eprintln!("total segments: {}", media.segments.len());
+        eprintln!("total segments: {}, duration: {:.1}s", media.segments.len(), media.duration_secs);
 
         let video_idx = media.video_streams.first().map(|v| v.stream_index).unwrap_or(0);
         let audio_idx = media.audio_streams.first().map(|a| a.stream_index).unwrap_or(1);
         let transcode = Some("aac");
         let audio_sample_rate = 48000u64;
-
-        // Print video timebase
         let vtb = media.video_timebase;
-        eprintln!("video timebase: {}/{}", vtb.numerator(), vtb.denominator());
 
-        // Find segments around 1:20 (80s) and 1:33 (93s)
-        let target_times_sec = [75.0f64, 80.0, 85.0, 90.0, 93.0, 98.0];
-        let mut printed_segs = std::collections::HashSet::new();
+        let mut prev_a_end: Option<u64> = None;
+        let mut prev_v_end: Option<u64> = None;
+        let mut audio_issues = 0;
+        let mut video_issues = 0;
 
-        for &t in &target_times_sec {
-            let t_in_vtb = (t * vtb.denominator() as f64 / vtb.numerator() as f64) as i64;
-            // Find segment whose [start_pts, end_pts) contains t_in_vtb
-            for (i, seg) in media.segments.iter().enumerate() {
-                if seg.start_pts <= t_in_vtb && (i + 1 >= media.segments.len() || media.segments[i+1].start_pts > t_in_vtb) {
-                    if printed_segs.insert(i) {
-                        let start_sec = seg.start_pts as f64 * vtb.numerator() as f64 / vtb.denominator() as f64;
-                        eprintln!("\n--- seg {} (start={:.3}s, target={:.3}s) ---", i, start_sec, t);
-                        match crate::segment::generator::generate_interleaved_segment(
-                            &media, video_idx, audio_idx, seg, &asset_path, transcode,
-                        ) {
-                            Ok(data) => {
-                                let all_moofs = parse_all_moofs(&data);
-                                eprintln!("  {} fragment(s), {} bytes", all_moofs.len(), data.len());
-                                for (fi, (v_tfdt, a_tfdt, _v_cnt, a_cnt, v_dur, a_def_dur)) in all_moofs.iter().enumerate() {
-                                    let v_end = v_tfdt + v_dur;
-                                    let a_end = a_tfdt + a_cnt * a_def_dur;
-                                    eprintln!("  frag{}: video tfdt={} end={} ({:.3}s-{:.3}s)  audio tfdt={} end={} ({:.3}s-{:.3}s) cnt={}",
-                                        fi,
-                                        v_tfdt, v_end, *v_tfdt as f64/90000.0, v_end as f64/90000.0,
-                                        a_tfdt, a_end, *a_tfdt as f64/audio_sample_rate as f64, a_end as f64/audio_sample_rate as f64,
-                                        a_cnt,
-                                    );
-                                }
-                                // Cross-segment audio continuity: save last end
-                                if let Some(last) = all_moofs.last() {
-                                    let total_a_end = last.1 + last.3 * last.5;
-                                    eprintln!("  audio end={} ({:.3}s)", total_a_end, total_a_end as f64/audio_sample_rate as f64);
-                                }
-                            }
-                            Err(e) => eprintln!("  ERROR: {}", e),
+        for (i, seg) in media.segments.iter().enumerate() {
+            let start_sec = seg.start_pts as f64 * vtb.numerator() as f64 / vtb.denominator() as f64;
+            match crate::segment::generator::generate_interleaved_segment(
+                &media, video_idx, audio_idx, seg, &asset_path, transcode,
+            ) {
+                Ok(data) => {
+                    let all_moofs = parse_all_moofs(&data);
+                    let first_v = all_moofs.first().map(|m| m.0).unwrap_or(0);
+                    let first_a = all_moofs.first().map(|m| m.1).unwrap_or(0);
+                    // Compute last video/audio end across all fragments
+                    let mut last_v_end = first_v;
+                    let mut last_a_end = first_a;
+                    for (v_tfdt, a_tfdt, _v_cnt, a_cnt, v_dur, a_def_dur) in &all_moofs {
+                        last_v_end = v_tfdt + v_dur;
+                        last_a_end = a_tfdt + a_cnt * a_def_dur;
+                    }
+
+                    let mut line = format!("seg {:2} ({:7.3}s): v=[{:.3}-{:.3}] a=[{:.3}-{:.3}]",
+                        i, start_sec,
+                        first_v as f64/90000.0, last_v_end as f64/90000.0,
+                        first_a as f64/audio_sample_rate as f64, last_a_end as f64/audio_sample_rate as f64,
+                    );
+
+                    // Check audio continuity
+                    if let Some(pa) = prev_a_end {
+                        if first_a > pa {
+                            let gap = first_a - pa;
+                            line += &format!("  *** A-GAP {} ({:.1}ms)", gap, gap as f64 * 1000.0 / audio_sample_rate as f64);
+                            audio_issues += 1;
+                        } else if first_a < pa {
+                            let overlap = pa - first_a;
+                            line += &format!("  *** A-OVERLAP {} ({:.1}ms)", overlap, overlap as f64 * 1000.0 / audio_sample_rate as f64);
+                            audio_issues += 1;
                         }
                     }
-                    break;
+                    // Check video continuity
+                    if let Some(pv) = prev_v_end {
+                        if first_v > pv {
+                            let gap = first_v - pv;
+                            line += &format!("  *** V-GAP {} ({:.1}ms)", gap, gap as f64 * 1000.0 / 90000.0);
+                            video_issues += 1;
+                        } else if first_v < pv {
+                            let overlap = pv - first_v;
+                            line += &format!("  *** V-OVERLAP {} ({:.1}ms)", overlap, overlap as f64 * 1000.0 / 90000.0);
+                            video_issues += 1;
+                        }
+                    }
+
+                    eprintln!("{}", line);
+                    prev_a_end = Some(last_a_end);
+                    prev_v_end = Some(last_v_end);
+                }
+                Err(e) => {
+                    eprintln!("seg {:2} ({:7.3}s): ERROR: {}", i, start_sec, e);
                 }
             }
         }
+        eprintln!("\nTotal: {} audio issues, {} video issues out of {} segments",
+            audio_issues, video_issues, media.segments.len());
+        assert_eq!(audio_issues, 0, "Audio continuity issues found");
     }
 
     /// Same as dump_alex_interleaved but with AC-3→AAC transcoding enabled.
