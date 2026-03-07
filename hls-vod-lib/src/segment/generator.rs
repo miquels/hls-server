@@ -1148,12 +1148,7 @@ fn generate_media_segment_ffmpeg(
 
     let target_start_sec = segment.start_pts as f64 * video_timebase.numerator() as f64
         / video_timebase.denominator() as f64;
-    let seek_sec = if is_interleaved && transcode_audio_to_aac {
-        (target_start_sec - 0.5).max(0.0)
-    } else {
-        target_start_sec
-    };
-    let seek_ts = (seek_sec * 1_000_000.0) as i64;
+    let seek_ts = (target_start_sec * 1_000_000.0) as i64;
 
     let mut input = index.get_context()?;
     // avformat_seek_file (mov demuxer) compares the target `ts` against PTS, not
