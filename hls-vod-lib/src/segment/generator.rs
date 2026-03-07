@@ -300,6 +300,10 @@ pub(crate) fn generate_interleaved_init_segment(
         .build()
 }
 
+/// Generate an interleaved audio+video media segment (`.m4s`).
+///
+/// Resolves whether the audio track needs transcoding to AAC and delegates to
+/// the common FFmpeg muxing path.
 pub(crate) fn generate_interleaved_segment(
     index: &StreamIndex,
     video_idx: usize,
@@ -330,6 +334,7 @@ pub(crate) fn generate_interleaved_segment(
     )
 }
 
+/// Generate a video-only media segment (`.m4s`) for the given sequence number.
 pub(crate) fn generate_video_segment(
     index: &StreamIndex,
     track_index: usize,
@@ -667,13 +672,26 @@ pub(crate) fn generate_subtitle_segment(
     Ok(bytes)
 }
 
+/// A demuxed packet held in memory while the full segment is being collected.
+///
+/// Carries the stream metadata needed for timestamp rescaling alongside the
+/// packet itself, so callers don't need to keep a reference to the source stream.
 pub(crate) struct BufferedPacket {
+    /// Source stream index this packet belongs to.
     pub stream_id: usize,
+    /// The raw compressed packet.
     pub packet: ffmpeg::Packet,
+    /// Time base of the source stream (used for timestamp rescaling).
     pub timebase: ffmpeg::Rational,
+    /// `true` for video packets, `false` for audio.
     pub is_video_stream: bool,
 }
 
+/// Read and buffer all packets belonging to one segment from `input`.
+///
+/// Iterates the demuxer until both video (stopped at the next keyframe boundary)
+/// and audio (stopped at `segment.end_pts`) are fully consumed.  Returns packets
+/// in demux order, each tagged with their stream metadata for later rescaling.
 fn buffer_media_packets(
     input: &mut ffmpeg::format::context::Input,
     segment: &SegmentInfo,
@@ -753,6 +771,12 @@ fn buffer_media_packets(
     buffered_packets
 }
 
+/// Transcode buffered audio packets to AAC if requested, otherwise no-op.
+///
+/// When `transcode_audio_to_aac` is true, extracts the raw audio packets from
+/// `buffered_packets`, runs them through the decode → resample → encode pipeline,
+/// and returns the resulting AAC packets along with their output timebase.
+/// When false, returns empty vecs immediately.
 fn transcode_audio_if_needed(
     input: &mut ffmpeg::format::context::Input,
     index: &StreamIndex,
@@ -799,6 +823,13 @@ fn transcode_audio_if_needed(
     Ok((transcoded_audio_packets, audio_output_tb))
 }
 
+/// Write buffered packets into `muxer`, interleaving transcoded audio as needed.
+///
+/// Filters out packets that precede the segment's nominal start time, rescales
+/// timestamps to the muxer's output timebase, and interleaves transcoded AAC
+/// packets with the video stream in decode order.  Returns the muxer (ready for
+/// `finalize_segment`) plus the DTS of the first video packet, the first audio
+/// packet, and the first packet of either kind — used to set TFDT values.
 fn mux_media_segment(
     _segment_type: &str,
     is_interleaved: bool,
@@ -952,6 +983,13 @@ fn mux_media_segment(
     Ok((muxer, first_video_dts, first_audio_dts, first_packet_dts))
 }
 
+/// Flush `muxer`, strip the init segment prefix, correct TFDT values in every
+/// `moof` fragment, prepend a `styp` box, and return the final `.m4s` bytes.
+///
+/// For interleaved segments the video and audio TFDTs are patched independently
+/// via their track IDs.  For single-track segments a single delta is applied.
+/// The `first_*_dts` values returned by `mux_media_segment` are used as the
+/// base for the delta so that the TFDT matches the actual first decoded frame.
 fn finalize_segment(
     segment_type: &str,
     is_interleaved: bool,
@@ -1090,9 +1128,13 @@ fn finalize_segment(
     Ok(Bytes::from(media_data))
 }
 
-/// Parse the minimum display PTS across all samples in a muxed fMP4 segment.
-/// Scans every moof/traf/tfdt/trun box and returns the smallest (tfdt + sample_CT) value.
-/// This is the earliest frame display time, used to align audio tfdt.
+/// Core FFmpeg-based segment generator shared by all media segment types.
+///
+/// Seeks the demuxer to the target IDR (with a 500 ms slack to work around the
+/// mov demuxer's PTS-based seek comparison for B-frame sources), registers the
+/// requested streams with the muxer, buffers packets until the segment boundary,
+/// optionally transcodes audio to AAC, muxes everything, and delegates final
+/// TFDT patching and `styp` insertion to `finalize_segment`.
 fn generate_media_segment_ffmpeg(
     segment: &SegmentInfo,
     segment_type: &str,
