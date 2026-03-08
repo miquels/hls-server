@@ -42,6 +42,8 @@ pub struct CacheSettings {
     pub max_segments: usize,
     /// TTL for cached segments in seconds
     pub ttl_secs: u64,
+    /// Number of segments to read ahead
+    pub lookahead: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -109,6 +111,7 @@ impl ConfigFile {
                 max_memory_mb: 512,
                 max_segments: 100,
                 ttl_secs: 300,
+                lookahead: 2,
             },
             segment: SegmentSettings {
                 target_duration_secs: 4.0,
@@ -141,7 +144,7 @@ impl ConfigFile {
                 max_memory_mb: self.cache.max_memory_mb,
                 max_segments: self.cache.max_segments,
                 ttl_secs: self.cache.ttl_secs,
-                lookahead: 0,
+                lookahead: self.cache.lookahead,
             },
             segment: crate::config::SegmentConfig {
                 target_duration_secs: self.segment.target_duration_secs,

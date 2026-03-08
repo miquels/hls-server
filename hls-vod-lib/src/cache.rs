@@ -64,7 +64,7 @@ impl Default for SegmentCacheConfig {
             max_memory_mb: 512,
             max_segments: 100, // ~400 seconds of content at 4s/segment
             ttl_secs: 300,     // 5 minutes
-            lookahead: 0,      // disabled by default
+            lookahead: 2,      // 2 segments by default
         }
     }
 }
