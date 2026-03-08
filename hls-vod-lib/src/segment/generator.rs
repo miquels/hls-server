@@ -147,6 +147,8 @@ impl<'a> InitSegmentBuilder<'a> {
         // For codecs like AC-3 that don't have extradata, we must feed first packets to the muxer to generate `moov`.
         // We skip this if transcoding to AAC because we already fed the AAC codec parameters explicitly.
         let mut data = if self.transcode_audio_to_aac {
+            // Do NOT use delay_moov here. If we do, FFmpeg will delay writing the moov
+            // until the first packet is seen, resulting in an empty init segment.
             muxer.write_header(false)?
         } else {
             let mut first_video = None;
@@ -193,8 +195,9 @@ impl<'a> InitSegmentBuilder<'a> {
 
             if !packets.is_empty() {
                 let refs: Vec<&mut ffmpeg::Packet> = packets.iter_mut().collect();
+                // Use delay_moov=false for init segment.
                 muxer
-                    .generate_init_segment_with_packets(refs)
+                    .generate_init_segment_with_packets(refs, false)
                     .map_err(|e| {
                         HlsError::Muxing(format!(
                             "Failed to generate init segment via packets: {}",
@@ -694,6 +697,7 @@ pub(crate) struct BufferedPacket {
 /// in demux order, each tagged with their stream metadata for later rescaling.
 fn buffer_media_packets(
     input: &mut ffmpeg::format::context::Input,
+    _index: &StreamIndex,
     segment: &SegmentInfo,
     segment_type: &str,
     video_timebase: ffmpeg::Rational,
@@ -1023,7 +1027,7 @@ fn mux_media_segment(
 fn finalize_segment(
     segment_type: &str,
     is_interleaved: bool,
-    _transcode_audio_to_aac: bool,
+    transcode_audio_to_aac: bool,
     video_timebase: ffmpeg::Rational,
     segment: &SegmentInfo,
     index: &StreamIndex,
@@ -1041,48 +1045,36 @@ fn finalize_segment(
         })?;
     let mut media_data = full_data[media_offset..].to_vec();
 
-    let encoder_delay: i64 = if segment_type == "audio" {
-        if let Some(target) = audio_track_index {
-            index
-                .audio_streams
-                .iter()
-                .find(|a| a.stream_index == target)
-                .map(|a| a.encoder_delay)
-                .unwrap_or(0)
+    let (audio_tb, encoder_delay): (ffmpeg::Rational, i64) = if let Some(target) = audio_track_index {
+        if let Ok(info) = index.get_audio_stream(target) {
+            let delay = if transcode_audio_to_aac {
+                1024 // AAC encoder delay
+            } else {
+                info.encoder_delay
+            };
+            (ffmpeg::Rational::new(1, info.sample_rate as i32), delay)
         } else {
-            index
-                .audio_streams
-                .first()
-                .map(|a| a.encoder_delay)
-                .unwrap_or(0)
+            (ffmpeg::Rational::new(1, 48000), 0)
         }
     } else {
-        0
+        (ffmpeg::Rational::new(1, 48000), 0)
     };
 
-    let video_target_tfdt = if segment_type == "audio" {
-        0
-    } else {
-        crate::ffmpeg_utils::utils::rescale_ts(
-            segment.start_pts,
-            video_timebase,
-            ffmpeg::Rational(1, 90000),
-        )
-        .max(0) as u64
-            + encoder_delay as u64
-    };
+    let video_target_tfdt = crate::ffmpeg_utils::utils::rescale_ts(
+        segment.start_pts,
+        video_timebase,
+        ffmpeg::Rational(1, 90000),
+    )
+    .max(0) as u64;
 
-    let audio_target_tfdt = if segment_type == "audio" || is_interleaved {
-        crate::ffmpeg_utils::utils::rescale_ts(
-            segment.start_pts,
-            video_timebase,
-            ffmpeg::Rational(1, 90000),
-        )
-        .max(0) as u64
-            + encoder_delay as u64
-    } else {
-        video_target_tfdt
-    };
+    let audio_target_tfdt = crate::ffmpeg_utils::utils::rescale_ts(
+        segment.start_pts,
+        video_timebase,
+        audio_tb,
+    )
+    .max(0) as i64
+        - encoder_delay;
+    let audio_target_tfdt = audio_target_tfdt.max(0) as u64;
 
     let start_frag_seq = segment.sequence as u32 + 1;
 
@@ -1091,23 +1083,15 @@ fn finalize_segment(
         let a_track: u32 = 2;
 
         let audio_tfdt_for_patch = if let Some(dts) = first_audio_dts {
-            dts.max(0) as u64
-        } else if let Some(dts) = first_packet_dts {
-            dts.max(0) as u64
+            // first_audio_dts is the DTS of the first packet we wrote (the priming packet).
+            // By setting tfdt to (dts - delay), the player's decoder (which
+            // also has a delay) will output the sample at dts.
+            (dts as i64 - encoder_delay).max(0) as u64
         } else {
-            let a_idx = audio_track_index.unwrap_or(0);
-            if let Ok(audio_info) = index.get_audio_stream(a_idx) {
-                let audio_tb = ffmpeg::Rational::new(1, audio_info.sample_rate as i32);
-                crate::ffmpeg_utils::utils::rescale_ts(segment.start_pts, video_timebase, audio_tb)
-                    .max(0) as u64
-            } else {
-                audio_target_tfdt
-            }
+            audio_target_tfdt
         };
 
         let video_tfdt_for_patch = if let Some(dts) = first_video_dts {
-            dts.max(0) as u64
-        } else if let Some(dts) = first_packet_dts {
             dts.max(0) as u64
         } else {
             video_target_tfdt
@@ -1130,7 +1114,9 @@ fn finalize_segment(
             }
         } else {
             if let Some(dts) = first_packet_dts {
-                dts.max(0) as u64
+                // For audio only, first_packet_dts is in audio_tb.
+                // We must shift by encoder_delay to align with presentation.
+                (dts as i64 - encoder_delay).max(0) as u64
             } else {
                 let a_idx = audio_track_index.unwrap_or(0);
                 if let Ok(audio_info) = index.get_audio_stream(a_idx) {
@@ -1303,22 +1289,18 @@ fn generate_media_segment_ffmpeg(
     //      write the moov without seeing actual packets because those codecs
     //      either need bitstream-derived extradata or have variable frame sizes.
     //
-    // For interleaved segments where audio is transcoded to AAC, the muxer
-    // already has complete AAC codec parameters at write_header time (from
-    // encoder.codec_parameters()), so no delay is needed — same code path as
-    // native-AAC interleaved.  Using delay_moov here would cause the same
-    // CTTS/tfdt corruption it causes for non-transcoded B-frame video.
-    let audio_needs_delay_moov = !transcode_audio_to_aac
-        && audio_track_index
-            .and_then(|idx| index.get_audio_stream(idx).ok())
-            .map(|a| a.codec_id != ffmpeg::codec::Id::AAC)
-            .unwrap_or(false);
-    let needs_delay_moov =
-        segment_type == "audio" || (segment_type == "av" && audio_needs_delay_moov);
+    // We now also enable it always for transcoded audio to ensure the muxer
+    // correctly handles the non-zero (often negative) start timestamps and
+    // writes the necessary elst (edit list) for AAC priming.
+    //
+    // Since we enabled CTTS v1 (negative_cts_offsets) in muxer.rs, delay_moov
+    // no longer causes the CTTS/tfdt corruption for B-frame video.
+    let needs_delay_moov = segment_type == "audio" || segment_type == "av";
     muxer.write_header(needs_delay_moov)?;
 
     let buffered_packets = buffer_media_packets(
         &mut input,
+        index,
         segment,
         segment_type,
         video_timebase,
@@ -1566,7 +1548,7 @@ mod tests {
 
         // Add an audio stream info
         index.audio_streams.push(crate::media::AudioStreamInfo {
-            stream_index: 1, // In bun33s.mp4, index 1 is audio
+            stream_index: 1,
             codec_id: ffmpeg::codec::Id::AAC,
             sample_rate: 48000,
             channels: 2,

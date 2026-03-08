@@ -53,9 +53,10 @@ pub fn scan_file_with_options<P: AsRef<Path>>(
     let mut index = StreamIndex::new(path.clone());
     index.duration_secs = context.duration() as f64 / ffmpeg::ffi::AV_TIME_BASE as f64;
 
-    // Analyze each stream (reads only codec parameters from the container header)
+    // Analyze each stream
     for (i, stream) in context.streams().enumerate() {
         let medium = stream.parameters().medium();
+
         match medium {
             ffmpeg::media::Type::Video => match analyze_video_stream(&stream, i) {
                 Ok(info) => {

@@ -92,9 +92,9 @@ impl Fmp4Muxer {
     pub fn write_header(&mut self, delay_moov: bool) -> Result<Vec<u8>> {
         let mut opts = ffmpeg::Dictionary::new();
         if delay_moov {
-            opts.set("movflags", "empty_moov+default_base_moof+delay_moov");
+            opts.set("movflags", "empty_moov+default_base_moof+delay_moov+negative_cts_offsets");
         } else {
-            opts.set("movflags", "empty_moov+default_base_moof");
+            opts.set("movflags", "empty_moov+default_base_moof+negative_cts_offsets");
         }
         opts.set("avoid_negative_ts", "0");
         // Prevent the mp4 muxer from implicitly adding frag_keyframe (which
@@ -121,12 +121,22 @@ impl Fmp4Muxer {
     /// Generate an init segment by writing multiple packets to force `moov` creation.
     /// Essential for interleaved segments with streams like AC-3 that lack extradata
     /// in the source container.
-    pub fn generate_init_segment_with_packets<'a, I>(&mut self, packets: I) -> Result<Vec<u8>>
+    pub fn generate_init_segment_with_packets<'a, I>(
+        &mut self,
+        packets: I,
+        delay_moov: bool,
+    ) -> Result<Vec<u8>>
     where
         I: IntoIterator<Item = &'a mut ffmpeg::Packet>,
     {
         let mut opts = ffmpeg::Dictionary::new();
-        opts.set("movflags", "empty_moov+default_base_moof+delay_moov");
+        if delay_moov {
+            opts.set("movflags", "empty_moov+default_base_moof+delay_moov+negative_cts_offsets");
+        } else {
+            // Even if caller said false, we might want it for consistency.
+            // But let's respect the flag for now but add CTTS v1.
+            opts.set("movflags", "empty_moov+default_base_moof+negative_cts_offsets");
+        }
         opts.set("avoid_negative_ts", "0");
 
         self.output
@@ -616,7 +626,7 @@ mod tests {
         }
 
         let init_data = muxer
-            .generate_init_segment_with_packets(vec![&mut pkt])
+            .generate_init_segment_with_packets(vec![&mut pkt], true)
             .expect("Failed to generate AC3 init segment");
 
         assert!(!init_data.is_empty(), "Init segment should not be empty");
@@ -701,7 +711,7 @@ mod tests {
         let pkt_refs: Vec<&mut ffmpeg::Packet> = pkts.iter_mut().collect();
 
         let init_data = muxer
-            .generate_init_segment_with_packets(pkt_refs)
+            .generate_init_segment_with_packets(pkt_refs, true)
             .expect("Failed to generate AV AC3 init segment");
 
         assert!(!init_data.is_empty(), "Init segment should not be empty");

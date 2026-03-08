@@ -196,9 +196,11 @@ pub fn transcode_audio_segment(
 
         while let Some(mut pkt) = encoder.receive_packet()? {
             let pkt_pts = pkt.pts().unwrap_or(0);
-            if pkt_pts >= target_grid_start_48k && pkt_pts < audio_end_limit_48k {
+            // Allow one priming packet (usually -1024) if it's the very first packet
+            // of the encoder output, to provide context/silence for the decoder.
+            if (pkt_pts >= target_grid_start_48k - 1024) && pkt_pts < audio_end_limit_48k {
                 if shift_to_zero {
-                    let relative_pts = pkt_pts - target_grid_start_48k;
+                    let relative_pts = pkt_pts - (target_grid_start_48k - 1024);
                     pkt.set_pts(Some(relative_pts));
                     pkt.set_dts(Some(relative_pts));
                 }
@@ -212,9 +214,9 @@ pub fn transcode_audio_segment(
     let tail = encoder.flush()?;
     for mut pkt in tail {
         let pkt_pts = pkt.pts().unwrap_or(0);
-        if pkt_pts >= target_grid_start_48k && pkt_pts < audio_end_limit_48k {
+        if (pkt_pts >= target_grid_start_48k - 1024) && pkt_pts < audio_end_limit_48k {
             if shift_to_zero {
-                let relative_pts = pkt_pts - target_grid_start_48k;
+                let relative_pts = pkt_pts - (target_grid_start_48k - 1024);
                 pkt.set_pts(Some(relative_pts));
                 pkt.set_dts(Some(relative_pts));
             }
