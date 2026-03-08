@@ -624,9 +624,10 @@ fn buffer_media_packets(
 /// and returns the resulting AAC packets along with their output timebase.
 /// When false, returns empty vecs immediately.
 fn transcode_audio_if_needed(
-    input: &mut ffmpeg::format::context::Input,
     index: &StreamIndex,
     audio_track_index: Option<usize>,
+    audio_params: Option<ffmpeg::codec::Parameters>,
+    audio_timebase: Option<ffmpeg::Rational>,
     transcode_audio_to_aac: bool,
     buffered_packets: &[BufferedPacket],
     segment: &SegmentInfo,
@@ -637,48 +638,47 @@ fn transcode_audio_if_needed(
     let mut audio_output_tb = None;
 
     if transcode_audio_to_aac {
-        if let Some(audio_idx) = audio_track_index {
-            if let Some(s) = input.stream(audio_idx) {
-                let decoder = crate::transcode::decoder::AudioDecoder::open(&s)?;
-                let audio_info = index.get_audio_stream(audio_idx)?;
-                let audio_tb = s.time_base();
+        if let (Some(audio_idx), Some(params), Some(audio_tb)) =
+            (audio_track_index, audio_params, audio_timebase)
+        {
+            let decoder = crate::transcode::decoder::AudioDecoder::open(params, audio_idx)?;
+            let audio_info = index.get_audio_stream(audio_idx)?;
 
-                // Collect audio packets from the main buffered set
-                let main_audio_packets: Vec<_> = buffered_packets
-                    .iter()
-                    .filter(|p| p.stream_id == audio_idx)
-                    .map(|p| p.packet.clone())
-                    .collect();
+            // Collect audio packets from the main buffered set
+            let main_audio_packets: Vec<_> = buffered_packets
+                .iter()
+                .filter(|p| p.stream_id == audio_idx)
+                .map(|p| p.packet.clone())
+                .collect();
 
-                // Merge pre-roll with main packets, deduplicating by DTS.
-                // The pre-roll seek may return packets that also appear after the
-                // main byte-aligned seek (interleaving overlap), so we skip any
-                // main packet whose DTS already appears in the pre-roll.
-                let preroll_dts: std::collections::HashSet<i64> = audio_preroll
-                    .iter()
-                    .map(|p| p.dts().or(p.pts()).unwrap_or(i64::MIN))
-                    .collect();
-                let mut all_audio_packets = audio_preroll;
-                for pkt in main_audio_packets {
-                    let dts = pkt.dts().or(pkt.pts()).unwrap_or(i64::MIN);
-                    if !preroll_dts.contains(&dts) {
-                        all_audio_packets.push(pkt);
-                    }
+            // Merge pre-roll with main packets, deduplicating by DTS.
+            // The pre-roll seek may return packets that also appear after the
+            // main byte-aligned seek (interleaving overlap), so we skip any
+            // main packet whose DTS already appears in the pre-roll.
+            let preroll_dts: std::collections::HashSet<i64> = audio_preroll
+                .iter()
+                .map(|p| p.dts().or(p.pts()).unwrap_or(i64::MIN))
+                .collect();
+            let mut all_audio_packets = audio_preroll;
+            for pkt in main_audio_packets {
+                let dts = pkt.dts().or(pkt.pts()).unwrap_or(i64::MIN);
+                if !preroll_dts.contains(&dts) {
+                    all_audio_packets.push(pkt);
                 }
-                all_audio_packets.sort_by_key(|p| p.dts().or(p.pts()).unwrap_or(0));
-
-                let (aac_packets, output_tb) = crate::transcode::pipeline::transcode_audio_segment(
-                    decoder,
-                    all_audio_packets,
-                    audio_tb,
-                    audio_info,
-                    segment,
-                    video_timebase,
-                    false,
-                )?;
-                transcoded_audio_packets = aac_packets;
-                audio_output_tb = Some(output_tb);
             }
+            all_audio_packets.sort_by_key(|p| p.dts().or(p.pts()).unwrap_or(0));
+
+            let (aac_packets, output_tb) = crate::transcode::pipeline::transcode_audio_segment(
+                decoder,
+                all_audio_packets,
+                audio_tb,
+                audio_info,
+                segment,
+                video_timebase,
+                false,
+            )?;
+            transcoded_audio_packets = aac_packets;
+            audio_output_tb = Some(output_tb);
         }
     }
 
@@ -1154,6 +1154,16 @@ fn generate_media_segment_ffmpeg(
         )));
     }
 
+    let mut audio_params = None;
+    let mut audio_timebase = None;
+
+    if let Some(audio_idx) = audio_track_index {
+        if let Some(s) = input.stream(audio_idx) {
+            audio_params = Some(s.parameters());
+            audio_timebase = Some(s.time_base());
+        }
+    }
+
     // delay_moov is required when:
     //   1. Pure audio segments: no video keyframes to drive fragmentation.
     //   2. Non-transcoded interleaved segments with a non-AAC audio codec
@@ -1179,18 +1189,22 @@ fn generate_media_segment_ffmpeg(
         audio_track_index,
     );
 
+    // Drop the context lock as soon as all raw packets are read.
+    // This allows other threads (look-ahead workers) to start reading the
+    // next segments while this thread performs the heavy transcoding/muxing.
+    std::mem::drop(input);
+
     let (transcoded_audio_packets, audio_output_tb) = transcode_audio_if_needed(
-        &mut input,
         index,
         audio_track_index,
+        audio_params,
+        audio_timebase,
         transcode_audio_to_aac,
         &buffered_packets,
         segment,
         video_timebase,
         audio_preroll_packets,
     )?;
-
-    std::mem::drop(input);
 
     let (muxer, _v_dts, _a_dts, _p_dts) = mux_media_segment(
         segment_type,

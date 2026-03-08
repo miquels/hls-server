@@ -17,19 +17,17 @@ pub struct AudioDecoder {
 }
 
 impl AudioDecoder {
-    /// Open a decoder for the given stream.
+    /// Open a decoder for the given parameters.
     ///
     /// Uses the stream's own codec parameters to initialise the context so no
     /// external configuration is needed.
-    pub fn open(stream: &ffmpeg::format::stream::Stream) -> Result<Self> {
-        let stream_index = stream.index();
-        let context =
-            ffmpeg::codec::Context::from_parameters(stream.parameters()).map_err(|e| {
-                HlsError::Ffmpeg(FfmpegError::DecoderNotFound(format!(
-                    "Failed to create codec context for stream {}: {}",
-                    stream_index, e
-                )))
-            })?;
+    pub fn open(params: ffmpeg::codec::Parameters, stream_index: usize) -> Result<Self> {
+        let context = ffmpeg::codec::Context::from_parameters(params).map_err(|e| {
+            HlsError::Ffmpeg(FfmpegError::DecoderNotFound(format!(
+                "Failed to create codec context for stream {}: {}",
+                stream_index, e
+            )))
+        })?;
 
         let decoder = context.decoder().audio().map_err(|e| {
             HlsError::Ffmpeg(FfmpegError::DecoderNotFound(format!(

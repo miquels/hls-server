@@ -55,56 +55,64 @@ fn worker_loop(rx: Receiver<Arc<StreamIndex>>) {
     for stream in rx {
         let stream_id = stream.stream_id.clone();
 
-        loop {
-            // Keep popping from this stream's queue until it's empty.
-            let next_params = {
-                let mut q = stream.lookahead_queue.lock().unwrap();
-                match q.pop_front() {
-                    Some(p) => p,
-                    None => break, // Done with this stream for now.
-                }
-            };
+        // Process EXACTLY ONE task from this stream's queue.
+        // This allows other workers in the threadpool to pick up remaining
+        // tasks for the same stream, enabling true parallel generation.
+        let next_params = {
+            let mut q = stream.lookahead_queue.lock().unwrap();
+            let p = q.pop_front();
 
-            let segment_key = next_params.to_string();
-
-            // Double-checked locking for dedup (fast path).
-            if let Some(c) = segment_cache() {
-                if c.get(&stream_id, &segment_key).is_some() {
-                    continue; // already cached
-                }
+            // If there's still work left, notify the queue so another worker
+            // (or this one, later) can pick it up.
+            if !q.is_empty() {
+                notify_lookahead(stream.clone());
             }
+            p
+        };
 
-            tracing::debug!(segment_key = %segment_key, "look-ahead: starting pre-generation (worker)");
+        let Some(next_params) = next_params else {
+            continue;
+        };
 
-            // Double-checked locking for dedup (locked path).
-            if let Some(c) = segment_cache() {
-                let lock = c.acquire_generation_lock(&stream_id, &segment_key);
-                let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
-                if c.get(&stream_id, &segment_key).is_some() {
+        let segment_key = next_params.to_string();
+
+        // Double-checked locking for dedup (fast path).
+        if let Some(c) = segment_cache() {
+            if c.get(&stream_id, &segment_key).is_some() {
+                continue; // already cached
+            }
+        }
+
+        tracing::debug!(segment_key = %segment_key, "look-ahead: starting pre-generation (worker)");
+
+        // Double-checked locking for dedup (locked path).
+        if let Some(c) = segment_cache() {
+            let lock = c.acquire_generation_lock(&stream_id, &segment_key);
+            let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+            if c.get(&stream_id, &segment_key).is_some() {
+                c.cleanup_generation_lock(&stream_id, &segment_key);
+                continue; // completed by another thread
+            }
+        }
+
+        let ps = PlaylistOrSegment {
+            hls_params: next_params,
+            index: stream.clone(),
+        };
+
+        match ps.do_generate() {
+            Ok((data, _)) => {
+                if let Some(c) = segment_cache() {
+                    c.insert(&stream_id, &segment_key, Bytes::from(data));
                     c.cleanup_generation_lock(&stream_id, &segment_key);
-                    continue; // completed by another thread
                 }
+                tracing::debug!(segment_key = %segment_key, "look-ahead: completed pre-generation (worker)");
             }
-
-            let ps = PlaylistOrSegment {
-                hls_params: next_params,
-                index: stream.clone(),
-            };
-
-            match ps.do_generate() {
-                Ok((data, _)) => {
-                    if let Some(c) = segment_cache() {
-                        c.insert(&stream_id, &segment_key, Bytes::from(data));
-                        c.cleanup_generation_lock(&stream_id, &segment_key);
-                    }
-                    tracing::debug!(segment_key = %segment_key, "look-ahead: completed pre-generation (worker)");
+            Err(e) => {
+                if let Some(c) = segment_cache() {
+                    c.cleanup_generation_lock(&stream_id, &segment_key);
                 }
-                Err(e) => {
-                    if let Some(c) = segment_cache() {
-                        c.cleanup_generation_lock(&stream_id, &segment_key);
-                    }
-                    tracing::warn!(segment_key = %segment_key, error = %e, "look-ahead: pre-generation failed (worker)");
-                }
+                tracing::warn!(segment_key = %segment_key, error = %e, "look-ahead: pre-generation failed (worker)");
             }
         }
     }
